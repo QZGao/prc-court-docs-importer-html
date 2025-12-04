@@ -39,7 +39,7 @@ class UploadResult:
 
 def build_edit_summary(wenshu_id: str) -> str:
     """Build a standardized edit summary."""
-    return f"Imported from 裁判文书全量数据 (wsKey: {wenshu_id})"
+    return f"Imported from 裁判文书网 (credit: caseopen.org), source: https://wenshu.court.gov.cn/website/wenshu/181107ANFZ0BXSK4/index.html?docId={wenshu_id}"
 
 
 def upload_document(

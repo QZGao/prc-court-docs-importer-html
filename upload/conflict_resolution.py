@@ -4,8 +4,6 @@ Conflict resolution for duplicate page titles.
 Handles two scenarios:
 1. Existing page is a {{versions}} page - add new entry to it
 2. Existing page is a {{header}} page from same court - create versions page and move existing
-
-Adapted from https://github.com/QZGao/prc-court-docs-importer-csv/blob/main/core/conflict_resolution.py
 """
 
 import re

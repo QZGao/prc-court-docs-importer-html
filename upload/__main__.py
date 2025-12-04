@@ -10,6 +10,10 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 from .uploader import process_upload_batch, RateLimiter
 
 

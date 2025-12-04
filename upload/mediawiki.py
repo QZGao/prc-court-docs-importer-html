@@ -2,10 +2,54 @@
 MediaWiki API client for zhwikisource.
 
 This module provides wrappers around pywikibot for page operations.
+Credentials are read from environment variables and written to pywikibot config files.
 """
 
+import os
 import time
+from pathlib import Path
 from typing import Optional, Tuple, Callable, Any
+
+# Project root directory (where this module's package lives)
+# MUST be set before importing pywikibot!
+PROJECT_ROOT = Path(__file__).parent.parent
+
+# Set PYWIKIBOT_DIR so pywikibot finds config files in project root
+os.environ["PYWIKIBOT_DIR"] = str(PROJECT_ROOT)
+
+
+def _write_user_config_before_import() -> None:
+    """
+    Write pywikibot config files BEFORE importing pywikibot.
+    
+    Pywikibot reads its config at import time, so we must write these files first.
+    """
+    bot_username = os.getenv("MW_BOT_USERNAME")
+    bot_password = os.getenv("MW_BOT_PASSWORD")
+    
+    if not bot_username or not bot_password:
+        # Skip writing - will fail later with clear error message
+        return
+    
+    config_path = PROJECT_ROOT / "user-config.py"
+    password_path = PROJECT_ROOT / "user-password.py"
+    
+    # Write user-config.py
+    user_config_content = f"""# Pywikibot configuration file (auto-generated from .env)
+family = 'wikisource'
+mylang = 'zh'
+usernames['wikisource']['zh'] = '{bot_username}'
+password_file = 'user-password.py'
+"""
+    config_path.write_text(user_config_content, encoding='utf-8')
+    
+    # Write user-password.py
+    password_path.write_text(f"('{bot_username}', '{bot_password}')\n", encoding='utf-8')
+
+
+# Write config files before importing pywikibot
+_write_user_config_before_import()
+
 import pywikibot
 from pywikibot import Site, Page
 
@@ -18,8 +62,31 @@ SITE_FAMILY = 'wikisource'
 DEFAULT_EDIT_INTERVAL = 3.0  # seconds between edits
 DEFAULT_MAXLAG = 5
 
-
 _site: Optional[Site] = None
+
+
+def _ensure_credentials() -> Tuple[str, str]:
+    """
+    Ensure bot credentials are available from environment variables.
+    
+    Returns:
+        Tuple of (bot_username, bot_password)
+        
+    Raises:
+        ValueError: If credentials are not set in environment
+    """
+    bot_username = os.getenv("MW_BOT_USERNAME")
+    bot_password = os.getenv("MW_BOT_PASSWORD")
+    
+    if not bot_username or not bot_password:
+        raise ValueError(
+            "Environment variables MW_BOT_USERNAME and MW_BOT_PASSWORD must be set.\n"
+            "Create a .env file with:\n"
+            "  MW_BOT_USERNAME=YourBot@botname\n"
+            "  MW_BOT_PASSWORD=your_bot_password"
+        )
+    
+    return bot_username, bot_password
 
 
 def get_site() -> Site:
@@ -28,9 +95,15 @@ def get_site() -> Site:
     
     Returns:
         The configured Site for zhwikisource
+        
+    Raises:
+        ValueError: If MW_BOT_USERNAME or MW_BOT_PASSWORD env vars are not set
     """
     global _site
     if _site is None:
+        # Validate credentials are set
+        _ensure_credentials()
+        
         _site = pywikibot.Site(SITE_CODE, SITE_FAMILY)
         _site.login()
     return _site
