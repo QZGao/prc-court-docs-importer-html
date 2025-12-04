@@ -78,6 +78,24 @@ def format_table(block: ContentBlock) -> str:
     return '\n'.join(lines)
 
 
+def format_list(block: ContentBlock) -> str:
+    """
+    Format a list block as wikitext list syntax.
+    
+    Uses * for unordered lists and # for ordered lists.
+    """
+    list_type = block.metadata.get('list_type', 'unordered')
+    items = block.metadata.get('items', [])
+    
+    if not items:
+        return ""
+    
+    marker = '#' if list_type == 'ordered' else '*'
+    lines = [f'{marker} {escape_wikitext(item)}' for item in items]
+    
+    return '\n'.join(lines)
+
+
 def render_header_template(
     title: str,
     court: str,
@@ -177,6 +195,9 @@ def render_body_paragraphs(blocks: list) -> str:
         if block.block_type == BlockType.TABLE:
             result_lines.append(format_table(block))
             result_lines.append("")  # Blank line after table
+        elif block.block_type == BlockType.LIST:
+            result_lines.append(format_list(block))
+            result_lines.append("")  # Blank line after list
         else:
             # Filter out junk paragraphs
             if is_junk_paragraph(block.text):

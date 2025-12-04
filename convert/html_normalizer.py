@@ -102,6 +102,7 @@ class BlockType(Enum):
     SIGNATURE = auto()    # Judge/clerk signatures - right-aligned
     DATE = auto()         # Date - right-aligned, contains 年月日
     TABLE = auto()        # Table content
+    LIST = auto()         # List (ul/ol) content
     EMPTY = auto()        # Empty or whitespace-only block
 
 
@@ -335,6 +336,32 @@ def parse_table(table: Tag) -> ContentBlock:
     )
 
 
+def parse_list(list_element: Tag) -> ContentBlock:
+    """
+    Parse a list element (ul/ol) into a ContentBlock with list metadata.
+    
+    Args:
+        list_element: A <ul> or <ol> tag
+        
+    Returns:
+        ContentBlock with LIST type and items in metadata
+    """
+    list_type = 'ordered' if list_element.name == 'ol' else 'unordered'
+    items = []
+    
+    for li in list_element.find_all('li', recursive=False):
+        item_text = clean_text(li.get_text())
+        if item_text:
+            items.append(item_text)
+    
+    return ContentBlock(
+        BlockType.LIST,
+        "",  # Text is in metadata
+        str(list_element),
+        metadata={'list_type': list_type, 'items': items}
+    )
+
+
 def normalize_html(html_content: str) -> ParsedDocument:
     """
     Parse and normalize HTML content from a court document.
@@ -368,6 +395,10 @@ def normalize_html(html_content: str) -> ParsedDocument:
         # Handle different element types
         if element.name == 'table':
             all_blocks.append(parse_table(element))
+        elif element.name in ('ul', 'ol'):
+            block = parse_list(element)
+            if block.metadata.get('items'):
+                all_blocks.append(block)
         elif element.name == 'div':
             # Check if div contains p tags - if so, process them individually
             p_tags = element.find_all('p', recursive=False)

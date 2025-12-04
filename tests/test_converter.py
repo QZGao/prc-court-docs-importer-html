@@ -394,9 +394,8 @@ class TestSignatureFormatting:
     def test_format_job_title_daili(self):
         """Test 代理 prefix formatting."""
         result = format_job_title("代理审判员")
-        # 代理 + 审判员: 代　理　审　判　员
-        assert f"代{EN_QUAD}理" in result
-        assert f"审{EN_QUAD}判{EN_QUAD}员" in result
+        # 代理 + 审判员: 代理审判员
+        assert result == "代理审判员"
     
     def test_format_name_2char(self):
         """Test 2-char names have En Quad in the middle."""

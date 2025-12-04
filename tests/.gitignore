@@ -1,4 +1,7 @@
-test_*.jsonl
-test_*.json
-test_*.txt
-*_test.py
+*.jsonl
+*.json
+*.txt
+*.py
+!__init__.py
+!test_*.py
+!test_cases.json
