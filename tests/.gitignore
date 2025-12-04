@@ -1,2 +1,4 @@
 test_*.jsonl
+test_*.json
 test_*.txt
+*_test.py

@@ -369,9 +369,25 @@ def normalize_html(html_content: str) -> ParsedDocument:
         if element.name == 'table':
             all_blocks.append(parse_table(element))
         elif element.name == 'div':
-            block = parse_div_block(element)
-            if block.block_type != BlockType.EMPTY:
-                all_blocks.append(block)
+            # Check if div contains p tags - if so, process them individually
+            p_tags = element.find_all('p', recursive=False)
+            if p_tags:
+                for p in p_tags:
+                    block = parse_div_block(p)
+                    if block.block_type != BlockType.EMPTY:
+                        all_blocks.append(block)
+            else:
+                # Also check for nested divs containing p tags
+                nested_p_tags = element.find_all('p')
+                if nested_p_tags:
+                    for p in nested_p_tags:
+                        block = parse_div_block(p)
+                        if block.block_type != BlockType.EMPTY:
+                            all_blocks.append(block)
+                else:
+                    block = parse_div_block(element)
+                    if block.block_type != BlockType.EMPTY:
+                        all_blocks.append(block)
         elif element.name in ('p', 'span'):
             # Treat like div
             block = parse_div_block(element)
@@ -430,6 +446,8 @@ def normalize_html(html_content: str) -> ParsedDocument:
         else:
             if block.block_type == BlockType.DATE and doc.date_block is None:
                 doc.date_block = block
+                # Also add to signature_blocks so date-based splitting works
+                doc.signature_blocks.append(block)
                 after_date = True
             elif block.block_type == BlockType.SIGNATURE or (block.block_type == BlockType.PARAGRAPH and not after_date):
                 doc.signature_blocks.append(block)
@@ -509,45 +527,50 @@ def extract_date_components(date_text: str) -> Tuple[Optional[str], Optional[str
     return None, None, None
 
 
-def extract_judges_and_clerks(signature_blocks: List[ContentBlock]) -> Tuple[List[str], List[str]]:
+def extract_judges_and_clerks(signature_blocks: List[ContentBlock], date_block: Optional[ContentBlock] = None) -> Tuple[List[str], List[str]]:
     """
     Extract judges and clerks from signature blocks.
     
+    Uses the date as a splitter: judges appear before the date, clerks after.
+    If no date is found, all signatures are treated as clerks.
+    
+    Args:
+        signature_blocks: List of signature ContentBlocks
+        date_block: The date block that separates judges from clerks
+        
     Returns:
         Tuple of (judges_list, clerks_list)
     """
     judges = []
     clerks = []
     
-    # Base job titles for judges and clerks
-    judge_base = ['审判长', '审判员', '人民陪审员', '执行员']
-    clerk_base = ['书记员', '法官助理', '校对责任人', '打印责任人', '校对人']
+    # Find the date position in signature blocks
+    date_idx = None
     
-    # Build keywords including 代理 variants
-    judge_keywords = []
-    for job in judge_base:
-        judge_keywords.append(job)
-        judge_keywords.append(f'代理{job}')
+    # Check if any signature block is actually a date
+    for i, block in enumerate(signature_blocks):
+        if is_date_text(block.text):
+            date_idx = i
+            break
     
-    clerk_keywords = []
-    for job in clerk_base:
-        clerk_keywords.append(job)
-        clerk_keywords.append(f'代理{job}')
-    
-    for block in signature_blocks:
-        text = block.text
-        # Normalize text by removing spaces for keyword matching
-        # (source HTML often has spaced job titles like "审 判 员")
-        text_normalized = text.replace(" ", "")
+    # If we have a date, split by it
+    if date_idx is not None:
+        # Everything before date -> judges
+        for block in signature_blocks[:date_idx]:
+            text = block.text.strip()
+            if text and not is_date_text(text):
+                judges.append(text)
         
-        # Check for clerk keywords first (more specific)
-        is_clerk = any(kw in text_normalized for kw in clerk_keywords)
-        is_judge = any(kw in text_normalized for kw in judge_keywords)
-        
-        if is_clerk:
-            clerks.append(text)
-        elif is_judge:
-            judges.append(text)
-        # If neither, might be a continuation or other content - skip
+        # Everything after date -> clerks
+        for block in signature_blocks[date_idx + 1:]:
+            text = block.text.strip()
+            if text and not is_date_text(text):
+                clerks.append(text)
+    else:
+        # No date found - treat everything as clerks
+        for block in signature_blocks:
+            text = block.text.strip()
+            if text:
+                clerks.append(text)
     
     return judges, clerks

@@ -448,7 +448,7 @@ class TestTestCasesConversion:
                 p.unlink()
         
         # Run the actual converter
-        success_count, error_count = process_jsonl_stream(input_path, output_path, error_path)
+        success_count, error_count, skipped_count, last_doc_num = process_jsonl_stream(input_path, output_path, error_path)
         
         print(f"\nConverter results: {success_count} succeeded, {error_count} failed")
         print(f"Output: {output_path}")

@@ -106,6 +106,8 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
     try:
         # 1. Extract required fields
         title = remove_cjk_spaces(raw_json.get('s1', '').strip())
+        # Normalize middle dot variants to standard middle dot (·)
+        title = re.sub(r'[．‧•･・]', '·', title)
         wenshu_id = raw_json.get('wsKey', '').strip()
         court_s2 = remove_cjk_spaces(raw_json.get('s2', '').strip())
         doc_id = raw_json.get('s7', '').strip()
@@ -239,7 +241,11 @@ def process_jsonl_stream(
     input_path: Path,
     output_path: Path,
     error_path: Path,
-) -> Tuple[int, int]:
+    doc_filter: Optional[callable] = None,
+    start_from: int = 0,
+    max_success: Optional[int] = None,
+    original_path: Optional[Path] = None,
+) -> Tuple[int, int, int, int]:
     """
     Process a JSON file in streaming mode.
     
@@ -250,38 +256,72 @@ def process_jsonl_stream(
         input_path: Path to input JSON/JSONL file
         output_path: Path to output JSONL file (converted documents)
         error_path: Path to error JSONL file (failed conversions)
+        doc_filter: Optional filter function that takes raw_json and returns True to process
+        start_from: Skip documents until this document number (1-indexed)
+        max_success: Stop after this many successful conversions (None = no limit)
+        original_path: Optional path to save original JSON for processed documents
         
     Returns:
-        Tuple of (success_count, error_count)
+        Tuple of (success_count, error_count, skipped_count, last_doc_num)
     """
     success_count = 0
     error_count = 0
+    skipped_count = 0
     doc_num = 0
     
-    with open(input_path, 'r', encoding='utf-8') as infile, \
-         open(output_path, 'a', encoding='utf-8') as outfile, \
-         open(error_path, 'a', encoding='utf-8') as errfile:
-        
-        for raw_json in iter_json_objects(infile):
-            doc_num += 1
-            
-            # Convert document
-            result, error = convert_document(raw_json)
-            
-            if result:
-                outfile.write(json.dumps(asdict(result), ensure_ascii=False) + '\n')
-                success_count += 1
-            else:
-                errfile.write(json.dumps(asdict(error), ensure_ascii=False) + '\n')
-                error_count += 1
-            
-            # Progress logging every 1000 documents
-            if doc_num % 1000 == 0:
-                print(f"Processed {doc_num} documents: {success_count} success, {error_count} errors")
+    # Open original file if requested
+    orig_file = None
+    if original_path:
+        orig_file = open(original_path, 'a', encoding='utf-8')
     
-    return success_count, error_count
+    try:
+        with open(input_path, 'r', encoding='utf-8') as infile, \
+             open(output_path, 'a', encoding='utf-8') as outfile, \
+             open(error_path, 'a', encoding='utf-8') as errfile:
+            
+            for raw_json in iter_json_objects(infile):
+                doc_num += 1
+                
+                # Skip documents if resuming
+                if doc_num <= start_from:
+                    if doc_num % 10000 == 0:
+                        print(f"Skipping to resume point... {doc_num}/{start_from}")
+                    continue
+                
+                # Apply filter if provided
+                if doc_filter and not doc_filter(raw_json):
+                    skipped_count += 1
+                    if doc_num % 10000 == 0:
+                        print(f"Scanned {doc_num} documents: {success_count} success, {error_count} errors, {skipped_count} skipped")
+                    continue
+                
+                # Save original JSON if requested
+                if orig_file:
+                    orig_file.write(json.dumps(raw_json, ensure_ascii=False) + '\n')
+                
+                # Convert document
+                result, error = convert_document(raw_json)
+                
+                if result:
+                    outfile.write(json.dumps(asdict(result), ensure_ascii=False) + '\n')
+                    success_count += 1
+                else:
+                    errfile.write(json.dumps(asdict(error), ensure_ascii=False) + '\n')
+                    error_count += 1
+                
+                # Progress logging every 1000 documents
+                if doc_num % 1000 == 0:
+                    print(f"Scanned {doc_num} documents: {success_count} success, {error_count} errors, {skipped_count} skipped")
+                
+                # Check if we've reached the limit
+                if max_success and success_count >= max_success:
+                    print(f"\nReached limit of {max_success} successful conversions.")
+                    break
+    finally:
+        if orig_file:
+            orig_file.close()
     
-    return success_count, error_count
+    return success_count, error_count, skipped_count, doc_num
 
 
 def convert_single(raw_json: dict) -> dict:

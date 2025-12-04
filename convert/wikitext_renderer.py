@@ -141,18 +141,48 @@ def render_doc_id_section(doc_id: str) -> str:
 '''
 
 
+# Pattern for junk paragraphs to filter out
+# Unicode hyphens/dashes: - (hyphen-minus), ‐ (hyphen), ‑ (non-breaking hyphen),
+# – (en dash), — (em dash), ― (horizontal bar), － (fullwidth hyphen-minus)
+DASH_CHARS = r'[\-\u2010\u2011\u2012\u2013\u2014\u2015\uff0d]'
+JUNK_PARAGRAPH_PATTERN = re.compile(
+    rf'^('
+    rf'{DASH_CHARS}?\d+{DASH_CHARS}?'  # Page numbers like -1-, –2–, 1, 2, etc.
+    rf'|\?'                             # Single question mark (OCR artifact)
+    rf'|第\s*\d+\s*页'                  # "第X页" page markers
+    rf')$'
+)
+
+
+def is_junk_paragraph(text: str) -> bool:
+    """
+    Check if a paragraph is junk content that should be filtered out.
+    
+    Examples of junk:
+        - Page numbers: "-1-", "-2-", "1", "2"
+        - OCR artifacts: "?"
+        - Page markers: "第1页"
+    """
+    return bool(JUNK_PARAGRAPH_PATTERN.match(text.strip()))
+
+
 def render_body_paragraphs(blocks: list) -> str:
     """
     Render body paragraphs with proper spacing.
+    Filters out junk paragraphs like page numbers and OCR artifacts.
     """
     result_lines = []
     
     for block in blocks:
         if block.block_type == BlockType.TABLE:
             result_lines.append(format_table(block))
+            result_lines.append("")  # Blank line after table
         else:
+            # Filter out junk paragraphs
+            if is_junk_paragraph(block.text):
+                continue
             result_lines.append(format_paragraph(block))
-        result_lines.append("")  # Blank line between paragraphs
+            result_lines.append("")  # Blank line between paragraphs
     
     return '\n'.join(result_lines)
 
@@ -215,25 +245,17 @@ def format_job_title(job: str) -> str:
         - 4字职务：用 Three-Per-Em Space 隔开，例如：`法 官 助 理`
         - 5字职务：保持原样，例如：`人民陪审员`
     """
-    # Handle 代理 prefix separately
-    is_daili = job.startswith('代理')
-    base_job = job[2:] if is_daili else job
-    
-    char_count = len(base_job)
+    char_count = len(job)
     
     if char_count == 3:
         # 3字职务：逐字用 En Quad 隔开
-        formatted_base = EN_QUAD.join(base_job)
+        formatted_base = EN_QUAD.join(job)
     elif char_count == 4:
         # 4字职务：用 Three-Per-Em Space 隔开
-        formatted_base = THREE_PER_EM.join(base_job)
+        formatted_base = THREE_PER_EM.join(job)
     else:
         # 5+字职务：保持原样
-        formatted_base = base_job
-    
-    if is_daili:
-        # 代理 prefix: 2 chars, use En Quad between them
-        return f'代{EN_QUAD}理{EN_QUAD}{formatted_base}'
+        formatted_base = job
     
     return formatted_base
 
@@ -318,6 +340,7 @@ def render_signature_section(
 def render_further_notes(blocks: list) -> str:
     """
     Render any content after the signature section.
+    Filters out junk paragraphs like page numbers and OCR artifacts.
     """
     if not blocks:
         return ""
@@ -326,9 +349,13 @@ def render_further_notes(blocks: list) -> str:
     for block in blocks:
         if block.block_type == BlockType.TABLE:
             result_lines.append(format_table(block))
+            result_lines.append("")
         else:
+            # Filter out junk paragraphs
+            if is_junk_paragraph(block.text):
+                continue
             result_lines.append(format_paragraph(block))
-        result_lines.append("")
+            result_lines.append("")
     
     return '\n'.join(result_lines)
 
@@ -337,7 +364,7 @@ def render_footer() -> str:
     """
     Render the footer with PD template.
     """
-    return "\n{{PD-PRC-exempt}}\n"
+    return "{{PD-PRC-exempt}}\n"
 
 
 def render_wikitext(doc: ParsedDocument, title: str) -> str:
@@ -361,8 +388,8 @@ def render_wikitext(doc: ParsedDocument, title: str) -> str:
     # Infer location from court name
     location = infer_location_from_court(doc.court_name)
     
-    # Extract judges and clerks
-    judges, clerks = extract_judges_and_clerks(doc.signature_blocks)
+    # Extract judges and clerks (using date as splitter)
+    judges, clerks = extract_judges_and_clerks(doc.signature_blocks, doc.date_block)
     
     # Build the complete wikitext
     parts = []
