@@ -1,5 +1,7 @@
 # PRC Court Documents Importer (HTML)
 
+[中文說明](README.zh-TW.md)
+
 A Python tool to convert Chinese court documents from HTML/JSONL format to zhwikisource-compatible wikitext.
 
 ## Overview
