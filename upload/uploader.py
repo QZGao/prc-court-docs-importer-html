@@ -36,10 +36,11 @@ class UploadResult:
     """Result of uploading a single document."""
     title: str
     wenshu_id: str
-    status: str  # 'uploaded', 'skipped', 'conflict_resolved', 'failed'
+    status: str  # 'uploaded', 'skipped', 'conflict_resolved', 'failed', 'overwritable'
     final_title: Optional[str] = None  # Different from title if conflict resolved
     message: str = ""
     timestamp: str = ""
+    wikitext: Optional[str] = None  # Included for overwritable entries
 
 
 def build_edit_summary(wenshu_id: str) -> str:
@@ -114,6 +115,29 @@ def upload_document(
                                 wikitext, title
                             )
                             
+                            # Check if new title already exists
+                            try:
+                                new_exists, _ = check_page_exists(new_title)
+                                if new_exists:
+                                    # Case-specific page exists - mark as overwritable
+                                    return UploadResult(
+                                        title=title,
+                                        wenshu_id=wenshu_id,
+                                        status='overwritable',
+                                        final_title=new_title,
+                                        message=f"Case-specific page already exists: {new_title}",
+                                        timestamp=timestamp,
+                                        wikitext=updated_wikitext,
+                                    )
+                            except Exception as e:
+                                return UploadResult(
+                                    title=title,
+                                    wenshu_id=wenshu_id,
+                                    status='failed',
+                                    message=f"Failed to check new title existence: {e}",
+                                    timestamp=timestamp,
+                                )
+                            
                             # Save the draft page at new title
                             # (pywikibot handles rate limiting automatically)
                             try:
@@ -147,13 +171,15 @@ def upload_document(
                                 timestamp=timestamp,
                             )
                     else:
-                        # Not resolvable - skip
+                        # Not resolvable - mark as overwritable for manual review
                         return UploadResult(
                             title=title,
                             wenshu_id=wenshu_id,
-                            status='skipped',
+                            status='overwritable',
+                            final_title=title,
                             message=f"Page exists, conflict not resolvable: {scenario}",
                             timestamp=timestamp,
+                            wikitext=wikitext,
                         )
             except Exception as e:
                 return UploadResult(
@@ -204,9 +230,10 @@ def process_upload_batch(
     uploaded_log: Path,
     failed_log: Path,
     skipped_log: Path,
+    overwritable_log: Path,
     resolve_conflicts: bool = True,
     max_documents: Optional[int] = None,
-) -> Tuple[int, int, int, int]:
+) -> Tuple[int, int, int, int, int]:
     """
     Process a batch of documents for upload.
     
@@ -218,16 +245,18 @@ def process_upload_batch(
         uploaded_log: Path to log successfully uploaded pages
         failed_log: Path to log failed uploads
         skipped_log: Path to log skipped pages
+        overwritable_log: Path to log pages that could be overwritten (JSONL with wikitext)
         resolve_conflicts: Whether to attempt conflict resolution
         max_documents: Maximum number of documents to process (None = all)
         
     Returns:
-        Tuple of (uploaded_count, failed_count, skipped_count, resolved_count)
+        Tuple of (uploaded_count, failed_count, skipped_count, resolved_count, overwritable_count)
     """
     uploaded_count = 0
     failed_count = 0
     skipped_count = 0
     resolved_count = 0
+    overwritable_count = 0
     doc_num = 0
     
     # Get file size for progress bar
@@ -241,7 +270,8 @@ def process_upload_batch(
     with open(input_path, 'r', encoding='utf-8') as infile, \
          open(uploaded_log, 'a', encoding='utf-8') as uploaded_f, \
          open(failed_log, 'a', encoding='utf-8') as failed_f, \
-         open(skipped_log, 'a', encoding='utf-8') as skipped_f:
+         open(skipped_log, 'a', encoding='utf-8') as skipped_f, \
+         open(overwritable_log, 'a', encoding='utf-8') as overwritable_f:
         
         with Progress(
             SpinnerColumn(),
@@ -332,6 +362,9 @@ def process_upload_batch(
                 elif result.status == 'skipped':
                     skipped_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
                     skipped_count += 1
+                elif result.status == 'overwritable':
+                    overwritable_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                    overwritable_count += 1
                 else:  # failed
                     failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
                     failed_count += 1
@@ -340,14 +373,14 @@ def process_upload_batch(
                 progress.update(
                     task, 
                     completed=bytes_read,
-                    description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+                    description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count + overwritable_count} ⊘"
                 )
             
             # Final update with green color
             progress.update(
                 task,
                 completed=file_size,
-                description=f"[green]Complete: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+                description=f"[green]Complete: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count + overwritable_count} ⊘"
             )
     
-    return uploaded_count, failed_count, skipped_count, resolved_count
+    return uploaded_count, failed_count, skipped_count, resolved_count, overwritable_count

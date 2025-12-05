@@ -145,7 +145,7 @@ python -m convert --resume input_checkpoint.json --limit 200
 
 ## 第二階段：上傳
 
-上傳階段將已轉換的 JSONL 檔案上傳至 zhwikisource，具備速率限制與衝突解決功能。
+上傳階段將已轉換的 JSONL 檔案上傳至維基文庫，具備速率限制與衝突解決功能。
 
 ### 設定
 
@@ -171,9 +171,10 @@ MW_BOT_PASSWORD=機器人名稱@您的機器人密碼
 python -m upload converted.jsonl
 
 # 將產生以下記錄檔：
-# - uploaded_YYYYMMDD_HHMMSS.log      （成功上傳）
+# - uploaded_YYYYMMDD_HHMMSS.log        （成功上傳）
 # - upload_failed_YYYYMMDD_HHMMSS.jsonl （失敗上傳）
-# - skipped_YYYYMMDD_HHMMSS.log       （已跳過的頁面）
+# - skipped_YYYYMMDD_HHMMSS.log         （已跳過的頁面）
+# - overwritable_YYYYMMDD_HHMMSS.jsonl  （可手動覆寫的頁面）
 ```
 
 #### 限制上傳數量

@@ -87,6 +87,7 @@ def main():
     uploaded_log = log_dir / f"uploaded_{timestamp}.log"
     failed_log = log_dir / f"upload_failed_{timestamp}.jsonl"
     skipped_log = log_dir / f"skipped_{timestamp}.log"
+    overwritable_log = log_dir / f"overwritable_{timestamp}.jsonl"
     
     # Print configuration
     console.print("=" * 60)
@@ -100,6 +101,7 @@ def main():
     console.print(f"Uploaded log:   {uploaded_log}")
     console.print(f"Failed log:     {failed_log}")
     console.print(f"Skipped log:    {skipped_log}")
+    console.print(f"Overwritable:   {overwritable_log}")
     console.print("=" * 60)
     console.print()
     
@@ -112,11 +114,12 @@ def main():
     console.print()
     
     try:
-        uploaded, failed, skipped, resolved = process_upload_batch(
+        uploaded, failed, skipped, resolved, overwritable = process_upload_batch(
             input_path=args.input,
             uploaded_log=uploaded_log,
             failed_log=failed_log,
             skipped_log=skipped_log,
+            overwritable_log=overwritable_log,
             resolve_conflicts=not args.no_resolve,
             max_documents=args.max,
         )
@@ -129,7 +132,7 @@ def main():
     
     end_time = datetime.now()
     duration = end_time - start_time
-    total = uploaded + failed + skipped + resolved
+    total = uploaded + failed + skipped + resolved + overwritable
     
     # Print summary
     console.print()
@@ -140,6 +143,7 @@ def main():
     console.print(f"Successfully uploaded: {uploaded}")
     console.print(f"Conflicts resolved:    {resolved}")
     console.print(f"Skipped:               {skipped}")
+    console.print(f"Overwritable:          {overwritable}")
     console.print(f"Failed:                {failed}")
     console.print(f"Duration:              {duration}")
     if duration.total_seconds() > 0:

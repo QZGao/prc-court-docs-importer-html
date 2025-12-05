@@ -171,9 +171,10 @@ To get bot credentials:
 python -m upload converted.jsonl
 
 # Output log files will be created:
-# - uploaded_YYYYMMDD_HHMMSS.log      (successful uploads)
+# - uploaded_YYYYMMDD_HHMMSS.log        (successful uploads)
 # - upload_failed_YYYYMMDD_HHMMSS.jsonl (failed uploads)
-# - skipped_YYYYMMDD_HHMMSS.log       (skipped pages)
+# - skipped_YYYYMMDD_HHMMSS.log         (skipped pages)
+# - overwritable_YYYYMMDD_HHMMSS.jsonl  (pages that can be manually overwritten)
 ```
 
 #### Limiting Upload Count
