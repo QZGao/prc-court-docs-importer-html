@@ -1,6 +1,7 @@
 # Core dependencies
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
+rich>=13.0.0
 
 # MediaWiki integration (for upload phase)
 pywikibot>=9.0.0

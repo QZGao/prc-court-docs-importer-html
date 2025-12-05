@@ -3,10 +3,11 @@ MediaWiki API client for zhwikisource.
 
 This module provides wrappers around pywikibot for page operations.
 Credentials are read from environment variables and written to pywikibot config files.
+
+Rate limiting is handled by pywikibot's built-in throttle (put_throttle setting).
 """
 
 import os
-import time
 from pathlib import Path
 from typing import Optional, Tuple, Callable, Any
 
@@ -215,36 +216,13 @@ def move_page(
     return True
 
 
-class RateLimiter:
+def configure_throttle(interval: float = DEFAULT_EDIT_INTERVAL, maxlag: int = DEFAULT_MAXLAG) -> None:
     """
-    Rate limiter for API requests.
+    Configure pywikibot's built-in rate limiting.
     
-    Ensures minimum interval between operations and handles maxlag.
+    Args:
+        interval: Minimum seconds between edits (put_throttle)
+        maxlag: Server lag threshold for API requests
     """
-    
-    def __init__(
-        self,
-        min_interval: float = DEFAULT_EDIT_INTERVAL,
-        maxlag: int = DEFAULT_MAXLAG,
-    ):
-        self.min_interval = min_interval
-        self.maxlag = maxlag
-        self.last_request_time = 0.0
-    
-    def wait(self):
-        """Wait until the next request can be made."""
-        elapsed = time.time() - self.last_request_time
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed)
-        self.last_request_time = time.time()
-    
-    def handle_maxlag(self, retry_after: int = 30):
-        """
-        Handle maxlag response by waiting.
-        
-        Args:
-            retry_after: Seconds to wait (default 30, max 120)
-        """
-        wait_time = min(retry_after, 120)
-        print(f"Maxlag hit, waiting {wait_time} seconds...")
-        time.sleep(wait_time)
+    pywikibot.config.put_throttle = int(interval)
+    pywikibot.config.maxlag = maxlag

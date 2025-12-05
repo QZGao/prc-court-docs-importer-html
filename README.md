@@ -184,7 +184,7 @@ python -m upload converted.jsonl --max 10
 #### Custom Rate Limiting
 
 ```bash
-# Set custom interval between edits (default: 3 seconds)
+# Set custom interval between edits (default: 10 seconds, pywikibot's default)
 python -m upload converted.jsonl --interval 5
 
 # Set custom maxlag parameter (default: 5)
@@ -210,7 +210,7 @@ python -m upload converted.jsonl --log-dir ./logs
 | Option | Short | Description |
 |--------|-------|-------------|
 | `input` | | Input converted JSONL file path |
-| `--interval` | `-i` | Minimum seconds between edits (default: 3) |
+| `--interval` | `-i` | Minimum seconds between edits (default: 10) |
 | `--maxlag` | `-m` | Maxlag parameter for API (default: 5) |
 | `--max` | `-n` | Maximum documents to upload |
 | `--no-resolve` | | Disable conflict resolution |
@@ -230,11 +230,11 @@ Conflicts that cannot be resolved automatically are logged to the skipped log fi
 
 ### Rate Limiting
 
-The uploader respects MediaWiki API constraints:
+Rate limiting is handled by pywikibot's built-in throttle:
 
-- **Edit interval**: Minimum 3 seconds between edits (configurable)
-- **Maxlag handling**: Automatically waits 30-120 seconds when server is overloaded
-- **Retry logic**: Failed edits due to maxlag are retried once
+- **Edit interval**: Uses pywikibot's `put_throttle` setting (default 10 seconds, configurable via `--interval`)
+- **Maxlag handling**: Pywikibot automatically respects server-side maxlag responses
+- **Throttle file**: Pywikibot writes `throttle.ctrl` to manage throttling state
 
 ## License
 

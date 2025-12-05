@@ -9,11 +9,16 @@ import json
 import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Optional, Tuple, Generator, Dict, Any
+from typing import Optional, Tuple, Generator, Dict, Any, Callable
 from pathlib import Path
+
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn, SpinnerColumn
+from rich.console import Console
 
 from .html_normalizer import normalize_html, remove_cjk_spaces
 from .wikitext_renderer import render_wikitext
+
+console = Console()
 
 
 @dataclass
@@ -202,18 +207,24 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
     ), None
 
 
-def iter_json_objects(infile):
+def iter_json_objects(infile, progress_callback: Optional[Callable[[int], None]] = None):
     """
     Iterate over JSON objects from a file, supporting both:
     - JSONL format (one object per line)
     - Pretty-printed format (multi-line objects)
     
+    Args:
+        infile: File object to read from
+        progress_callback: Optional callback called with bytes read after each object
+    
     Yields each parsed JSON object.
     """
     buffer = []
+    bytes_read = 0
     
     for line in infile:
         stripped = line.strip()
+        bytes_read += len(line.encode('utf-8'))
         
         if not stripped:
             continue
@@ -229,6 +240,8 @@ def iter_json_objects(infile):
                 obj = json.loads(chunk)
                 yield obj
                 buffer = []
+                if progress_callback:
+                    progress_callback(bytes_read)
             except json.JSONDecodeError:
                 # Not complete yet, keep buffering (for nested structures)
                 if stripped == '}':
@@ -241,7 +254,7 @@ def process_jsonl_stream(
     input_path: Path,
     output_path: Path,
     error_path: Path,
-    doc_filter: Optional[callable] = None,
+    doc_filter: Optional[Callable] = None,
     start_from: int = 0,
     max_success: Optional[int] = None,
     original_path: Optional[Path] = None,
@@ -269,6 +282,9 @@ def process_jsonl_stream(
     skipped_count = 0
     doc_num = 0
     
+    # Get file size for progress bar
+    file_size = input_path.stat().st_size
+    
     # Open original file if requested
     orig_file = None
     if original_path:
@@ -279,44 +295,71 @@ def process_jsonl_stream(
              open(output_path, 'a', encoding='utf-8') as outfile, \
              open(error_path, 'a', encoding='utf-8') as errfile:
             
-            for raw_json in iter_json_objects(infile):
-                doc_num += 1
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TextColumn("•"),
+                TimeRemainingColumn(),
+                console=console,
+                transient=False,
+            ) as progress:
+                task = progress.add_task(
+                    f"[cyan]0 docs: 0 success, 0 errors, 0 skipped",
+                    total=file_size
+                )
                 
-                # Skip documents if resuming
-                if doc_num <= start_from:
-                    if doc_num % 10000 == 0:
-                        print(f"Skipping to resume point... {doc_num}/{start_from}")
-                    continue
+                current_bytes = 0
                 
-                # Apply filter if provided
-                if doc_filter and not doc_filter(raw_json):
-                    skipped_count += 1
-                    if doc_num % 10000 == 0:
-                        print(f"Scanned {doc_num} documents: {success_count} success, {error_count} errors, {skipped_count} skipped")
-                    continue
+                def update_bytes(bytes_read: int):
+                    nonlocal current_bytes
+                    current_bytes = bytes_read
                 
-                # Save original JSON if requested
-                if orig_file:
-                    orig_file.write(json.dumps(raw_json, ensure_ascii=False) + '\n')
+                for raw_json in iter_json_objects(infile, update_bytes):
+                    doc_num += 1
+                    
+                    # Update progress bar
+                    progress.update(
+                        task,
+                        completed=current_bytes,
+                        description=f"[cyan]{doc_num} docs: {success_count} success, {error_count} errors, {skipped_count} skipped"
+                    )
+                    
+                    # Skip documents if resuming
+                    if doc_num <= start_from:
+                        continue
+                    
+                    # Apply filter if provided
+                    if doc_filter and not doc_filter(raw_json):
+                        skipped_count += 1
+                        continue
+                    
+                    # Save original JSON if requested
+                    if orig_file:
+                        orig_file.write(json.dumps(raw_json, ensure_ascii=False) + '\n')
+                    
+                    # Convert document
+                    result, error = convert_document(raw_json)
+                    
+                    if result:
+                        outfile.write(json.dumps(asdict(result), ensure_ascii=False) + '\n')
+                        success_count += 1
+                    else:
+                        errfile.write(json.dumps(asdict(error), ensure_ascii=False) + '\n')
+                        error_count += 1
+                    
+                    # Check if we've reached the limit
+                    if max_success and success_count >= max_success:
+                        console.print(f"\n[yellow]Reached limit of {max_success} successful conversions.[/yellow]")
+                        break
                 
-                # Convert document
-                result, error = convert_document(raw_json)
-                
-                if result:
-                    outfile.write(json.dumps(asdict(result), ensure_ascii=False) + '\n')
-                    success_count += 1
-                else:
-                    errfile.write(json.dumps(asdict(error), ensure_ascii=False) + '\n')
-                    error_count += 1
-                
-                # Progress logging every 1000 documents
-                if doc_num % 1000 == 0:
-                    print(f"Scanned {doc_num} documents: {success_count} success, {error_count} errors, {skipped_count} skipped")
-                
-                # Check if we've reached the limit
-                if max_success and success_count >= max_success:
-                    print(f"\nReached limit of {max_success} successful conversions.")
-                    break
+                # Final update
+                progress.update(
+                    task,
+                    completed=file_size,
+                    description=f"[green]{doc_num} docs: {success_count} success, {error_count} errors, {skipped_count} skipped"
+                )
     finally:
         if orig_file:
             orig_file.close()

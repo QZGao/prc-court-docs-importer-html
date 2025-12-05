@@ -14,7 +14,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from .uploader import process_upload_batch, RateLimiter
+from .mediawiki import configure_throttle
+from .uploader import process_upload_batch
 
 
 def main():
@@ -31,9 +32,9 @@ def main():
     
     parser.add_argument(
         "--interval", "-i",
-        type=float,
-        default=3.0,
-        help="Minimum seconds between edits (default: 3)"
+        type=int,
+        default=10,
+        help="Minimum seconds between edits (default: 10, pywikibot's default)"
     )
     
     parser.add_argument(
@@ -83,7 +84,7 @@ def main():
     print("Court Document Uploader")
     print("=" * 60)
     print(f"Input:          {args.input}")
-    print(f"Edit interval:  {args.interval}s")
+    print(f"Edit interval:  {args.interval}s (pywikibot put_throttle)")
     print(f"Maxlag:         {args.maxlag}")
     print(f"Max documents:  {args.max or 'all'}")
     print(f"Resolve:        {not args.no_resolve}")
@@ -93,11 +94,8 @@ def main():
     print("=" * 60)
     print()
     
-    # Create rate limiter
-    rate_limiter = RateLimiter(
-        min_interval=args.interval,
-        maxlag=args.maxlag,
-    )
+    # Configure pywikibot's built-in rate limiting
+    configure_throttle(interval=args.interval, maxlag=args.maxlag)
     
     # Run upload
     start_time = datetime.now()
@@ -110,7 +108,6 @@ def main():
             uploaded_log=uploaded_log,
             failed_log=failed_log,
             skipped_log=skipped_log,
-            rate_limiter=rate_limiter,
             resolve_conflicts=not args.no_resolve,
             max_documents=args.max,
         )

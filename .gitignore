@@ -153,6 +153,9 @@ apicache/
 pywikibot-*.lwp
 throttle.ctrl
 
+# Working directory (local uploads)
+working/
+
 # Spyder project settings
 .spyderproject
 .spyproject

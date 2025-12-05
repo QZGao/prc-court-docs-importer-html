@@ -76,7 +76,7 @@ def main():
         "--errors", "-e",
         type=Path,
         default=None,
-        help="Path to error log JSONL file (default: <input>_failed.jsonl)"
+        help="Path to error log JSONL file (default: <output>_failed.jsonl)"
     )
     
     parser.add_argument(
@@ -105,7 +105,7 @@ def main():
         "--checkpoint", "-c",
         type=Path,
         default=None,
-        help="Path to checkpoint file (default: <input>_checkpoint.json)"
+        help="Path to checkpoint file (default: <output>_checkpoint.json)"
     )
     
     parser.add_argument(
@@ -163,11 +163,14 @@ def main():
         
         input_path = args.input
         input_stem = input_path.stem
-        input_parent = input_path.parent
         
-        output_path = args.output or (input_parent / f"{input_stem}_converted.jsonl")
-        error_path = args.errors or (input_parent / f"{input_stem}_failed.jsonl")
-        checkpoint_path = args.checkpoint or (input_parent / f"{input_stem}_checkpoint.json")
+        output_path = args.output or (input_path.parent / f"{input_stem}_converted.jsonl")
+        output_parent = output_path.parent
+        output_stem = output_path.stem
+        
+        # Put error log and checkpoint in the same directory as output
+        error_path = args.errors or (output_parent / f"{output_stem}_failed.jsonl")
+        checkpoint_path = args.checkpoint or (output_parent / f"{output_stem}_checkpoint.json")
         filter_pattern = args.filter
         max_success = args.limit
         start_from = 0

@@ -1,23 +1,21 @@
 """
 Uploader for court documents to zhwikisource.
 
-This module handles batch uploading with rate limiting, error handling,
-and conflict resolution.
+This module handles batch uploading with error handling and conflict resolution.
+Rate limiting is handled by pywikibot's built-in throttle.
 """
 
 import json
-import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Generator
+from typing import Optional, Tuple
 
 from .mediawiki import (
     get_site,
     check_page_exists,
     get_page_content,
     save_page,
-    RateLimiter,
 )
 from .conflict_resolution import (
     is_conflict_resolvable,
@@ -46,26 +44,23 @@ def upload_document(
     title: str,
     wenshu_id: str,
     wikitext: str,
-    rate_limiter: RateLimiter,
     resolve_conflicts: bool = True,
 ) -> UploadResult:
     """
     Upload a single document to zhwikisource.
     
+    Rate limiting is handled by pywikibot's built-in throttle.
+    
     Args:
         title: The page title
         wenshu_id: The wenshu key for tracking
         wikitext: The wikitext content to upload
-        rate_limiter: Rate limiter instance
         resolve_conflicts: Whether to attempt conflict resolution
         
     Returns:
         UploadResult with status and details
     """
     timestamp = datetime.utcnow().isoformat() + "Z"
-    
-    # Apply rate limiting
-    rate_limiter.wait()
     
     # Check if page exists
     try:
@@ -113,7 +108,7 @@ def upload_document(
                             )
                             
                             # Save the draft page at new title
-                            rate_limiter.wait()
+                            # (pywikibot handles rate limiting automatically)
                             try:
                                 save_page(
                                     new_title,
@@ -187,35 +182,7 @@ def upload_document(
             timestamp=timestamp,
         )
     except Exception as e:
-        error_msg = str(e)
-        
-        # Check for maxlag
-        if 'maxlag' in error_msg.lower():
-            rate_limiter.handle_maxlag()
-            # Retry once
-            try:
-                save_page(
-                    title,
-                    wikitext,
-                    build_edit_summary(wenshu_id),
-                )
-                return UploadResult(
-                    title=title,
-                    wenshu_id=wenshu_id,
-                    status='uploaded',
-                    final_title=title,
-                    message="Created successfully (after maxlag retry)",
-                    timestamp=timestamp,
-                )
-            except Exception as e2:
-                return UploadResult(
-                    title=title,
-                    wenshu_id=wenshu_id,
-                    status='failed',
-                    message=f"Failed after maxlag retry: {e2}",
-                    timestamp=timestamp,
-                )
-        
+        # pywikibot handles maxlag automatically via config.maxlag
         return UploadResult(
             title=title,
             wenshu_id=wenshu_id,
@@ -230,28 +197,26 @@ def process_upload_batch(
     uploaded_log: Path,
     failed_log: Path,
     skipped_log: Path,
-    rate_limiter: Optional[RateLimiter] = None,
     resolve_conflicts: bool = True,
     max_documents: Optional[int] = None,
 ) -> Tuple[int, int, int, int]:
     """
     Process a batch of documents for upload.
     
+    Rate limiting is handled by pywikibot's built-in throttle.
+    Configure via mediawiki.configure_throttle() before calling.
+    
     Args:
         input_path: Path to converted JSONL file
         uploaded_log: Path to log successfully uploaded pages
         failed_log: Path to log failed uploads
         skipped_log: Path to log skipped pages
-        rate_limiter: Rate limiter instance (default: 3 sec interval)
         resolve_conflicts: Whether to attempt conflict resolution
         max_documents: Maximum number of documents to process (None = all)
         
     Returns:
         Tuple of (uploaded_count, failed_count, skipped_count, resolved_count)
     """
-    if rate_limiter is None:
-        rate_limiter = RateLimiter()
-    
     uploaded_count = 0
     failed_count = 0
     skipped_count = 0
@@ -304,7 +269,6 @@ def process_upload_batch(
                 title=title,
                 wenshu_id=wenshu_id,
                 wikitext=wikitext,
-                rate_limiter=rate_limiter,
                 resolve_conflicts=resolve_conflicts,
             )
             
