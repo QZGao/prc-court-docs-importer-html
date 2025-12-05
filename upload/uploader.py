@@ -6,10 +6,15 @@ Rate limiting is handled by pywikibot's built-in throttle.
 """
 
 import json
+import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
+
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn, SpinnerColumn
+from rich.console import Console
+from rich.logging import RichHandler
 
 from .mediawiki import (
     get_site,
@@ -22,6 +27,8 @@ from .conflict_resolution import (
     try_resolve_conflict,
     update_draft_for_conflict_resolution,
 )
+
+console = Console()
 
 
 @dataclass
@@ -221,78 +228,126 @@ def process_upload_batch(
     failed_count = 0
     skipped_count = 0
     resolved_count = 0
+    doc_num = 0
+    
+    # Get file size for progress bar
+    file_size = input_path.stat().st_size
+    bytes_read = 0
+    
+    # Suppress pywikibot's verbose output during upload
+    logging.getLogger('pywiki').setLevel(logging.WARNING)
+    logging.getLogger('pywikibot').setLevel(logging.WARNING)
     
     with open(input_path, 'r', encoding='utf-8') as infile, \
          open(uploaded_log, 'a', encoding='utf-8') as uploaded_f, \
          open(failed_log, 'a', encoding='utf-8') as failed_f, \
          open(skipped_log, 'a', encoding='utf-8') as skipped_f:
         
-        for line_num, line in enumerate(infile, 1):
-            if max_documents and line_num > max_documents:
-                break
-            
-            line = line.strip()
-            if not line:
-                continue
-            
-            try:
-                doc = json.loads(line)
-            except json.JSONDecodeError as e:
-                # Log parse error
-                error_entry = {
-                    "line_num": line_num,
-                    "error": f"JSON parse error: {e}",
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-                failed_f.write(json.dumps(error_entry, ensure_ascii=False) + '\n')
-                failed_count += 1
-                continue
-            
-            title = doc.get('title', '')
-            wenshu_id = doc.get('wenshu_id', '') or doc.get('wenshuID', '')
-            wikitext = doc.get('wikitext', '')
-            
-            if not title or not wikitext:
-                error_entry = {
-                    "line_num": line_num,
-                    "title": title,
-                    "wenshu_id": wenshu_id,
-                    "error": "Missing title or wikitext",
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-                failed_f.write(json.dumps(error_entry, ensure_ascii=False) + '\n')
-                failed_count += 1
-                continue
-            
-            # Upload the document
-            result = upload_document(
-                title=title,
-                wenshu_id=wenshu_id,
-                wikitext=wikitext,
-                resolve_conflicts=resolve_conflicts,
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("•"),
+            TimeRemainingColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            task = progress.add_task(
+                "[cyan]Uploading: 0 ✓, 0 ✗, 0 ⊘",
+                total=file_size
             )
             
-            # Log result
-            result_dict = asdict(result)
+            for line in infile:
+                # Track bytes read for progress
+                bytes_read += len(line.encode('utf-8'))
+                
+                line = line.strip()
+                if not line:
+                    progress.update(task, completed=bytes_read)
+                    continue
+                
+                doc_num += 1
+                
+                # Check max documents limit
+                if max_documents and doc_num > max_documents:
+                    break
+                
+                try:
+                    doc = json.loads(line)
+                except json.JSONDecodeError as e:
+                    # Log parse error
+                    error_entry = {
+                        "line_num": doc_num,
+                        "error": f"JSON parse error: {e}",
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                    failed_f.write(json.dumps(error_entry, ensure_ascii=False) + '\n')
+                    failed_count += 1
+                    progress.update(
+                        task, 
+                        completed=bytes_read,
+                        description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+                    )
+                    continue
+                
+                title = doc.get('title', '')
+                wenshu_id = doc.get('wenshu_id', '') or doc.get('wenshuID', '')
+                wikitext = doc.get('wikitext', '')
+                
+                if not title or not wikitext:
+                    error_entry = {
+                        "line_num": doc_num,
+                        "title": title,
+                        "wenshu_id": wenshu_id,
+                        "error": "Missing title or wikitext",
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                    failed_f.write(json.dumps(error_entry, ensure_ascii=False) + '\n')
+                    failed_count += 1
+                    progress.update(
+                        task, 
+                        completed=bytes_read,
+                        description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+                    )
+                    continue
+                
+                # Upload the document
+                result = upload_document(
+                    title=title,
+                    wenshu_id=wenshu_id,
+                    wikitext=wikitext,
+                    resolve_conflicts=resolve_conflicts,
+                )
+                
+                # Log result
+                result_dict = asdict(result)
+                
+                if result.status == 'uploaded':
+                    uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                    uploaded_count += 1
+                elif result.status == 'conflict_resolved':
+                    uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                    resolved_count += 1
+                elif result.status == 'skipped':
+                    skipped_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                    skipped_count += 1
+                else:  # failed
+                    failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                    failed_count += 1
+                
+                # Update progress bar
+                progress.update(
+                    task, 
+                    completed=bytes_read,
+                    description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+                )
             
-            if result.status == 'uploaded':
-                uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                uploaded_count += 1
-            elif result.status == 'conflict_resolved':
-                uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                resolved_count += 1
-            elif result.status == 'skipped':
-                skipped_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                skipped_count += 1
-            else:  # failed
-                failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                failed_count += 1
-            
-            # Progress logging
-            total = uploaded_count + failed_count + skipped_count + resolved_count
-            if total % 10 == 0:
-                print(f"Progress: {total} docs ({uploaded_count} uploaded, "
-                      f"{resolved_count} resolved, {skipped_count} skipped, "
-                      f"{failed_count} failed)")
+            # Final update with green color
+            progress.update(
+                task,
+                completed=file_size,
+                description=f"[green]Complete: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+            )
     
     return uploaded_count, failed_count, skipped_count, resolved_count
