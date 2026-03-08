@@ -15,23 +15,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from convert.html_normalizer import (
     normalize_html,
     clean_text,
-    get_text_align,
-    has_text_indent,
     is_date_text,
     is_signature_text,
     extract_date_components,
     remove_cjk_spaces,
-    BlockType,
 )
 from convert.wikitext_renderer import (
-    render_wikitext,
     convert_html_to_wikitext,
-    format_job_title,
-    format_name,
-    format_signature,
-    parse_signature_line,
-    EN_QUAD,
-    THREE_PER_EM,
 )
 from convert.location import (
     infer_location_from_court,
@@ -352,84 +342,6 @@ class TestWikitextRendering:
 
         assert "{{裁判文书署名|1=" in wikitext
         assert "审判员：张三" in wikitext
-
-
-class TestSignatureFormatting:
-    """Tests for signature formatting with proper spacing."""
-    
-    def test_parse_signature_line(self):
-        """Test parsing signature lines into job and name."""
-        job, name = parse_signature_line("审判员　　章辉")
-        assert job == "审判员"
-        assert name == "章辉"
-        
-        job, name = parse_signature_line("审 判 员　：杨清")
-        assert job == "审判员"
-        assert name == "杨清"
-        
-        job, name = parse_signature_line("人民陪审员　刘瑞璐")
-        assert job == "人民陪审员"
-        assert name == "刘瑞璐"
-    
-    def test_format_job_title_3char(self):
-        """Test 3-char job titles are separated by En Quad."""
-        result = format_job_title("审判长")
-        assert result == f"审{EN_QUAD}判{EN_QUAD}长"
-        
-        result = format_job_title("审判员")
-        assert result == f"审{EN_QUAD}判{EN_QUAD}员"
-        
-        result = format_job_title("书记员")
-        assert result == f"书{EN_QUAD}记{EN_QUAD}员"
-    
-    def test_format_job_title_4char(self):
-        """Test 4-char job titles are separated by Three-Per-Em Space."""
-        result = format_job_title("法官助理")
-        assert result == f"法{THREE_PER_EM}官{THREE_PER_EM}助{THREE_PER_EM}理"
-    
-    def test_format_job_title_5char(self):
-        """Test 5-char job titles remain unchanged."""
-        result = format_job_title("人民陪审员")
-        assert result == "人民陪审员"
-        
-        result = format_job_title("校对责任人")
-        assert result == "校对责任人"
-    
-    def test_format_job_title_daili(self):
-        """Test 代理 prefix formatting."""
-        result = format_job_title("代理审判员")
-        # 代理 + 审判员: 代理审判员
-        assert result == "代理审判员"
-    
-    def test_format_name_2char(self):
-        """Test 2-char names have En Quad in the middle."""
-        result = format_name("王杨")
-        assert result == f"王{EN_QUAD}杨"
-        
-        result = format_name("石君")
-        assert result == f"石{EN_QUAD}君"
-    
-    def test_format_name_3char(self):
-        """Test 3-char names remain unchanged."""
-        result = format_name("周海龙")
-        assert result == "周海龙"
-    
-    def test_format_name_4plus_char(self):
-        """Test 4+ char names remain unchanged."""
-        result = format_name("哈里木拉提")
-        assert result == "哈里木拉提"
-    
-    def test_format_signature_complete(self):
-        """Test complete signature formatting."""
-        result = format_signature("审判长　　谢朝彪")
-        # Should be: 审　判　长　　谢朝彪
-        assert f"审{EN_QUAD}判{EN_QUAD}长" in result
-        assert f"{EN_QUAD}{EN_QUAD}谢朝彪" in result
-        
-        result = format_signature("法官助理　　王杨")
-        # Should be: 法 官 助 理　　王　杨
-        assert f"法{THREE_PER_EM}官{THREE_PER_EM}助{THREE_PER_EM}理" in result
-        assert f"王{EN_QUAD}杨" in result
 
 
 class TestTestCasesConversion:

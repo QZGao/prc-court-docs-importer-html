@@ -11,13 +11,8 @@ from .html_normalizer import (
     ContentBlock,
     BlockType,
     extract_date_components,
-    extract_judges_and_clerks,
 )
 from .location import infer_location_from_court
-
-# Special Unicode characters for formatting signatures
-EN_QUAD = '\u3000'  # 宽空格，用于分隔字符和职务与名字之间
-THREE_PER_EM = '\u2004'  # 窄空格，用于4字职务对齐
 
 
 def escape_wikitext(text: str) -> str:
@@ -249,63 +244,6 @@ def parse_signature_line(text: str) -> Tuple[Optional[str], Optional[str]]:
             return job, name
     
     return None, None
-
-
-def format_job_title(job: str) -> str:
-    """
-    Format a job title with proper spacing according to the convention.
-    
-    Rules:
-        - 3字职务：逐字用 En Quad 隔开，例如：`审　判　长`
-        - 4字职务：用 Three-Per-Em Space 隔开，例如：`法 官 助 理`
-        - 5字职务：保持原样，例如：`人民陪审员`
-    """
-    char_count = len(job)
-    
-    if char_count == 3:
-        # 3字职务：逐字用 En Quad 隔开
-        formatted_base = EN_QUAD.join(job)
-    elif char_count == 4:
-        # 4字职务：用 Three-Per-Em Space 隔开
-        formatted_base = THREE_PER_EM.join(job)
-    else:
-        # 5+字职务：保持原样
-        formatted_base = job
-    
-    return formatted_base
-
-
-def format_name(name: str) -> str:
-    """
-    Format a name with proper spacing according to the convention.
-    
-    Rules:
-        - 2字名字：在中间插入一个 En Quad，例如：`王　杨`
-        - 3字名字：保持原样，例如：`周海龙`
-        - 4+字名字：保持原样，例如：`哈里木拉提`
-    """
-    if len(name) == 2:
-        return EN_QUAD.join(name)
-    return name
-
-
-def format_signature(text: str) -> str:
-    """
-    Format a single signature line with proper spacing.
-    
-    Input: "审判员　　章辉" or "审 判 员：杨清"
-    Output: "审　判　员　　章　辉" (with proper En Quad spacing)
-    """
-    job, name = parse_signature_line(text)
-    
-    if job and name:
-        formatted_job = format_job_title(job)
-        formatted_name = format_name(name)
-        # Job and name separated by two En Quads
-        return f'{formatted_job}{EN_QUAD}{EN_QUAD}{formatted_name}'
-    
-    # If parsing failed, return original text cleaned up
-    return text
 
 
 def render_signature_section(blocks: list) -> str:
