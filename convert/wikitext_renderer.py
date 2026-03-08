@@ -100,36 +100,30 @@ def render_header_template(
     title: str,
     court: str,
     doc_type: str,
+    case_number: str,
     year: Optional[str],
     month: Optional[str],
     day: Optional[str],
     location: Optional[str],
+    docid: Optional[str] = None,
 ) -> str:
     """
-    Render the {{header}} template for the document.
+    Render the {{Header/裁判文书}} template for the document.
     """
-    # Build type field with "中华人民共和国" prefix
-    type_field = f"中华人民共和国{doc_type}" if doc_type else ""
-    
     lines = [
-        "{{header",
+        "{{Header/裁判文书",
         f"|title = {title}",
-        f"|noauthor = {court}",
-        f"|type = {type_field}",
-        "|lawmaker = ",
-        "|section = ",
-        "|previous = ",
-        "|next = ",
+        f"|court = {court}",
+        f"|type = {doc_type}",
+        f"|案号 = {case_number}",
         f"|year = {year or ''}",
         f"|month = {month or ''}",
         f"|day = {day or ''}",
         f"|loc = {location or ''}",
-        "|from = ",
-        "|notes = ",
-        "|edition = ",
+        f"|docid = {docid or ''}",
         "}}",
     ]
-    
+
     return '\n'.join(lines)
 
 
@@ -314,47 +308,16 @@ def format_signature(text: str) -> str:
     return text
 
 
-def render_signature_section(
-    judges: list,
-    court: str,
-    date_text: Optional[str],
-    clerks: list,
-) -> str:
+def render_signature_section(blocks: list) -> str:
     """
-    Render the {{署名}} section with judges, court seal, date, and clerks.
-    
-    Formatting follows the convention:
-        - Job titles and names are separated by two En Quads
-        - 3-char job titles have En Quad between each char
-        - 4-char job titles have Three-Per-Em Space between each char
-        - 5+ char job titles have no spacing
-        - 2-char names have En Quad in the middle
-        - 3+ char names have no spacing
+    Render the {{裁判文书署名}} section with raw signature lines.
     """
-    lines = ["{{署名|"]
-    
-    # Add judges with proper formatting
-    for judge in judges:
-        lines.append(format_signature(judge))
-        lines.append("")
-    
-    # Add court seal
-    lines.append(f"{{{{印|{court}|center=国徽}}}}")
-    lines.append("")
-    
-    # Add date
-    if date_text:
-        lines.append(date_text)
-        lines.append("")
-    
-    # Add clerks with proper formatting
-    for i, clerk in enumerate(clerks):
-        lines.append(format_signature(clerk))
-        if i < len(clerks) - 1:
-            lines.append("")
-    
+    lines = ["{{裁判文书署名|1="]
+    for block in blocks:
+        text = block.text.strip()
+        if text:
+            lines.append(text)
     lines.append("}}")
-    
     return '\n'.join(lines)
 
 
@@ -388,7 +351,7 @@ def render_footer() -> str:
     return "{{PD-PRC-exempt}}\n"
 
 
-def render_wikitext(doc: ParsedDocument, title: str) -> str:
+def render_wikitext(doc: ParsedDocument, title: str, docid: Optional[str] = None) -> str:
     """
     Render a ParsedDocument as complete wikitext for zhwikisource.
     
@@ -401,48 +364,33 @@ def render_wikitext(doc: ParsedDocument, title: str) -> str:
     """
     # Extract date components
     year, month, day = None, None, None
-    date_text = ""
     if doc.date_block:
-        date_text = doc.date_block.text
-        year, month, day = extract_date_components(date_text)
-    
+        year, month, day = extract_date_components(doc.date_block.text)
+
     # Infer location from court name
     location = infer_location_from_court(doc.court_name)
-    
-    # Extract judges and clerks (using date as splitter)
-    judges, clerks = extract_judges_and_clerks(doc.signature_blocks, doc.date_block)
-    
+
     # Build the complete wikitext
     parts = []
-    
+
     # 1. Header template
     parts.append(render_header_template(
         title=title,
         court=doc.court_name,
         doc_type=doc.doc_type,
+        case_number=doc.doc_id,
         year=year,
         month=month,
         day=day,
         location=location,
+        docid=docid,
     ))
-    
-    # 2. Title section (centered court name and doc type)
-    parts.append(render_title_section(doc.court_name, doc.doc_type))
-    
-    # 3. Document ID (right-aligned)
-    if doc.doc_id:
-        parts.append(render_doc_id_section(doc.doc_id))
-    
-    # 4. Body paragraphs
+
+    # 2. Body paragraphs
     parts.append(render_body_paragraphs(doc.body_blocks))
-    
-    # 5. Signature section
-    parts.append(render_signature_section(
-        judges=judges,
-        court=doc.court_name,
-        date_text=date_text,
-        clerks=clerks,
-    ))
+
+    # 3. Signature section
+    parts.append(render_signature_section(doc.signature_blocks))
     
     # 6. Further notes (if any)
     if doc.further_notes:

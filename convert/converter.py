@@ -187,7 +187,7 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
     
     # 5. Render wikitext
     try:
-        wikitext = render_wikitext(doc, title)
+        wikitext = render_wikitext(doc, title, docid=wenshu_id)
     except Exception as e:
         return None, ConversionError(
             error_stage="render",

@@ -302,11 +302,11 @@ class TestFullConversion:
                 assert result.court
     
     def test_wikitext_has_header(self, test_cases):
-        """Generated wikitext should contain {{header}} template."""
+        """Generated wikitext should contain {{Header/裁判文书}} template."""
         for case in test_cases:
             result, error = convert_document(case)
             if result:
-                assert "{{header" in result.wikitext
+                assert "{{Header/裁判文书" in result.wikitext
     
     def test_wikitext_has_pd_template(self, test_cases):
         """Generated wikitext should contain PD template."""
@@ -334,20 +334,24 @@ class TestWikitextRendering:
         
         # Check header template
         assert "|title = 测试标题" in wikitext
-        assert "|noauthor = " in wikitext
-        assert "|type = 中华人民共和国执行裁定书" in wikitext
+        assert "|court = 江西省南昌市人民法院" in wikitext
+        assert "|type = 执行裁定书" in wikitext
+        assert "|案号 = （2024）赣01执123号" in wikitext
     
-    def test_larger_template_usage(self):
-        """Test that {{larger}} template is used for title."""
+    def test_signature_template_format(self):
+        """Test that {{裁判文书署名}} template is used for signatures."""
         html = """
         <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市高级人民法院</div>
         <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>民事判决书</div>
         <div style='TEXT-ALIGN: right;'>（2024）京民终1号</div>
+        <div style='TEXT-INDENT: 30pt;'>正文。</div>
+        <div style='TEXT-ALIGN: right;'>审判员　张三</div>
+        <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
         """
         wikitext = convert_html_to_wikitext(html, "标题")
-        
-        assert "{{larger|北京市高级人民法院}}" in wikitext
-        assert "{{larger|民事判决书}}" in wikitext
+
+        assert "{{裁判文书署名|1=" in wikitext
+        assert "审判员" in wikitext
 
 
 class TestSignatureFormatting:
