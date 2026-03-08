@@ -53,6 +53,7 @@ def upload_document(
     wenshu_id: str,
     wikitext: str,
     resolve_conflicts: bool = True,
+    force_overwrite: bool = False,
 ) -> UploadResult:
     """
     Upload a single document to zhwikisource.
@@ -69,7 +70,28 @@ def upload_document(
         UploadResult with status and details
     """
     timestamp = datetime.utcnow().isoformat() + "Z"
-    
+
+    # Force-overwrite mode: skip existence check and write directly
+    if force_overwrite:
+        try:
+            save_page(title, wikitext, build_edit_summary(wenshu_id))
+            return UploadResult(
+                title=title,
+                wenshu_id=wenshu_id,
+                status='uploaded',
+                final_title=title,
+                message="Overwritten successfully",
+                timestamp=timestamp,
+            )
+        except Exception as e:
+            return UploadResult(
+                title=title,
+                wenshu_id=wenshu_id,
+                status='failed',
+                message=f"Failed to overwrite: {e}",
+                timestamp=timestamp,
+            )
+
     # Check if page exists
     try:
         exists, page_id = check_page_exists(title)
@@ -232,6 +254,7 @@ def process_upload_batch(
     skipped_log: Path,
     overwritable_log: Path,
     resolve_conflicts: bool = True,
+    force_overwrite: bool = False,
     max_documents: Optional[int] = None,
 ) -> Tuple[int, int, int, int, int]:
     """
@@ -324,6 +347,9 @@ def process_upload_batch(
                 title = doc.get('title', '')
                 wenshu_id = doc.get('wenshu_id', '') or doc.get('wenshuID', '')
                 wikitext = doc.get('wikitext', '')
+                # When overwriting from an overwritable JSONL, use final_title as the target
+                if force_overwrite and doc.get('final_title'):
+                    title = doc['final_title']
                 
                 if not title or not wikitext:
                     error_entry = {
@@ -348,6 +374,7 @@ def process_upload_batch(
                     wenshu_id=wenshu_id,
                     wikitext=wikitext,
                     resolve_conflicts=resolve_conflicts,
+                    force_overwrite=force_overwrite,
                 )
                 
                 # Log result

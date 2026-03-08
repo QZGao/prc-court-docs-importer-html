@@ -65,6 +65,12 @@ def main():
         action="store_true",
         help="Disable conflict resolution (skip all conflicts)"
     )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Force-overwrite existing pages (for use with overwritable JSONL output)"
+    )
     
     parser.add_argument(
         "--log-dir",
@@ -98,6 +104,7 @@ def main():
     console.print(f"Maxlag:         {args.maxlag}")
     console.print(f"Max documents:  {args.max or 'all'}")
     console.print(f"Resolve:        {not args.no_resolve}")
+    console.print(f"Overwrite:      {args.overwrite}")
     console.print(f"Uploaded log:   {uploaded_log}")
     console.print(f"Failed log:     {failed_log}")
     console.print(f"Skipped log:    {skipped_log}")
@@ -121,6 +128,7 @@ def main():
             skipped_log=skipped_log,
             overwritable_log=overwritable_log,
             resolve_conflicts=not args.no_resolve,
+            force_overwrite=args.overwrite,
             max_documents=args.max,
         )
     except KeyboardInterrupt:
