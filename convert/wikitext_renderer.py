@@ -310,13 +310,25 @@ def format_signature(text: str) -> str:
 
 def render_signature_section(blocks: list) -> str:
     """
-    Render the {{裁判文书署名}} section with raw signature lines.
+    Render the {{裁判文书署名}} section.
+
+    Signature lines are reformatted as '职务：姓名' (fullwidth colon, no spaces).
+    Date lines and unrecognised lines are passed through unchanged.
     """
+    from .html_normalizer import is_date_text
     lines = ["{{裁判文书署名|1="]
     for block in blocks:
         text = block.text.strip()
-        if text:
+        if not text:
+            continue
+        if is_date_text(text):
             lines.append(text)
+        else:
+            job, name = parse_signature_line(text)
+            if job and name:
+                lines.append(f"{job}：{name}")
+            else:
+                lines.append(text)
     lines.append("}}")
     return '\n'.join(lines)
 

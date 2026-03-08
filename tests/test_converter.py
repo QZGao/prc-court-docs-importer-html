@@ -351,7 +351,7 @@ class TestWikitextRendering:
         wikitext = convert_html_to_wikitext(html, "标题")
 
         assert "{{裁判文书署名|1=" in wikitext
-        assert "审判员" in wikitext
+        assert "审判员：张三" in wikitext
 
 
 class TestSignatureFormatting:
