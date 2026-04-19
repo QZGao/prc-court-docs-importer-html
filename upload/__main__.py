@@ -41,8 +41,8 @@ def main():
     
     parser.add_argument(
         "--interval", "-i",
-        type=int,
-        default=10,
+        type=float,
+        default=10.0,
         help="Minimum seconds between edits (default: 10, pywikibot's default)"
     )
     
