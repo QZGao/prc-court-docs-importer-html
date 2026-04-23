@@ -154,7 +154,8 @@ pywikibot-*.lwp
 throttle.ctrl
 
 # Working directory (local uploads)
-working/
+working/*
+!working/scripts/
 
 # Spyder project settings
 .spyderproject
