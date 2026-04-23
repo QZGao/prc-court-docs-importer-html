@@ -415,7 +415,7 @@ def is_conflict_resolvable(
     existing_noauthor = extract_noauthor_from_content(existing_content)
 
     # Check if existing page is a versions page
-    if existing_content.strip().startswith("{{versions"):
+    if existing_content.strip().lower().startswith("{{versions"):
         if not draft_noauthor:
             return False, "Could not extract court from draft"
         if existing_noauthor and existing_noauthor != draft_noauthor:
@@ -423,7 +423,7 @@ def is_conflict_resolvable(
         return True, "Existing page is a {{versions}} page"
 
     # Check if existing page is a header page from same court
-    if existing_content.strip().startswith("{{header"):
+    if existing_content.strip().lower().startswith("{{header"):
         if not draft_noauthor or not existing_noauthor:
             return False, "Could not extract court info"
         if existing_noauthor != draft_noauthor:
