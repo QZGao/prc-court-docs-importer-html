@@ -42,6 +42,8 @@ CJK_PATTERN = re.compile(
     r']'
 )
 
+REDACTION_SEQUENCE_PATTERN = re.compile(r'[×XxＸｘ*＊∗✱﹡⁎٭※]{2,}')
+
 
 def remove_cjk_spaces(text: str) -> str:
     """
@@ -91,6 +93,40 @@ def remove_cjk_spaces(text: str) -> str:
         i += 1
     
     return ''.join(result)
+
+
+def normalize_redaction_markers(text: str) -> str:
+    """
+    Replace repeated redaction markers with {{PRC-redact}} templates.
+
+    Adjacent runs of two or more characters from ×, X, x, etc are
+    collapsed into a single template. Two markers use the default template,
+    while longer runs keep the run length as the first parameter.
+    """
+    if not text:
+        return text
+
+    def replacer(match: re.Match) -> str:
+        length = len(match.group(0))
+        if length == 2:
+            return "{{PRC-redact}}"
+        return f"{{{{PRC-redact|{length}}}}}"
+
+    return REDACTION_SEQUENCE_PATTERN.sub(replacer, text)
+
+
+def normalize_title_redaction_markers(text: str) -> str:
+    """
+    Normalize repeated title redaction markers to literal multiplication signs.
+
+    Titles cannot use {{PRC-redact}}, so adjacent runs of two or more redaction
+    markers are rewritten as the same number of '×' characters. Single marker
+    characters are left unchanged.
+    """
+    if not text:
+        return text
+
+    return REDACTION_SEQUENCE_PATTERN.sub(lambda match: '×' * len(match.group(0)), text)
 
 
 class BlockType(Enum):
@@ -145,6 +181,8 @@ def clean_text(text: str) -> str:
     text = text.strip()
     # Remove spaces between CJK characters (OCR artifacts)
     text = remove_cjk_spaces(text)
+    # Normalize repeated redaction placeholders to template form
+    text = normalize_redaction_markers(text)
     
     return text
 

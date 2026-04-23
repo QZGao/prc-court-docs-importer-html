@@ -18,6 +18,8 @@ from convert.html_normalizer import (
     is_date_text,
     is_signature_text,
     extract_date_components,
+    normalize_redaction_markers,
+    normalize_title_redaction_markers,
     remove_cjk_spaces,
 )
 from convert.wikitext_renderer import (
@@ -63,6 +65,36 @@ class TestCleanText:
     
     def test_none_handling(self):
         assert clean_text(None) == ""
+
+
+class TestRedactionNormalization:
+    """Tests for repeated redaction marker normalization."""
+
+    def test_two_markers_use_default_template(self):
+        assert normalize_redaction_markers("张三xx李四") == "张三{{PRC-redact}}李四"
+        assert normalize_redaction_markers("张三**李四") == "张三{{PRC-redact}}李四"
+
+    def test_three_or_more_markers_preserve_run_length(self):
+        assert normalize_redaction_markers("张三xxx李四") == "张三{{PRC-redact|3}}李四"
+        assert normalize_redaction_markers("张三Xｘ*李四") == "张三{{PRC-redact|3}}李四"
+        assert normalize_redaction_markers("张三Ｘ×xx李四") == "张三{{PRC-redact|4}}李四"
+
+    def test_single_marker_is_not_replaced(self):
+        assert normalize_redaction_markers("张三x李四") == "张三x李四"
+        assert normalize_redaction_markers("*") == "*"
+
+
+class TestTitleRedactionNormalization:
+    """Tests for title-specific redaction normalization."""
+
+    def test_title_uses_literal_multiplication_signs(self):
+        assert normalize_title_redaction_markers("张三xxx执行裁定书") == "张三×××执行裁定书"
+        assert normalize_title_redaction_markers("张三Xｘ*执行裁定书") == "张三×××执行裁定书"
+
+    def test_title_single_marker_is_normalized(self):
+        assert normalize_title_redaction_markers("张三x执行裁定书") == "张三x执行裁定书"
+        assert normalize_title_redaction_markers("张三X执行裁定书") == "张三X执行裁定书"
+        assert normalize_title_redaction_markers("张三*执行裁定书") == "张三*执行裁定书"
 
 
 class TestRemoveCjkSpaces:
@@ -342,6 +374,32 @@ class TestWikitextRendering:
 
         assert "{{裁判文书署名|1=" in wikitext
         assert "审判员：张三" in wikitext
+
+    def test_convert_document_redaction_normalizes_title_and_body(self):
+        raw_json = {
+            "s1": "关于张三xxx执行裁定书",
+            "wsKey": "doc-1",
+            "s2": "北京市第一中级人民法院",
+            "s7": "（2024）京01执xx号",
+            "s22": "北京市第一中级人民法院\n执行裁定书\n（2024）京01执xx号",
+            "qwContent": """
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市第一中级人民法院</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+                <div style='TEXT-ALIGN: right;'>（2024）京01执xx号</div>
+                <div style='TEXT-INDENT: 30pt;'>申请执行人张三ＸＸＸ。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.title == "关于张三×××执行裁定书"
+        assert "申请执行人张三{{PRC-redact|3}}。" in result.wikitext
+        assert "|title = 关于张三×××执行裁定书" in result.wikitext
+        assert "|案号 = （2024）京01执{{PRC-redact}}号" in result.wikitext
 
 
 class TestTestCasesConversion:

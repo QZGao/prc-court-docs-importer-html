@@ -15,7 +15,12 @@ from pathlib import Path
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn, SpinnerColumn
 from rich.console import Console
 
-from .html_normalizer import normalize_html, remove_cjk_spaces
+from .html_normalizer import (
+    normalize_html,
+    normalize_redaction_markers,
+    normalize_title_redaction_markers,
+    remove_cjk_spaces,
+)
 from .wikitext_renderer import render_wikitext
 
 console = Console()
@@ -110,13 +115,13 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
     
     try:
         # 1. Extract required fields
-        title = remove_cjk_spaces(raw_json.get('s1', '').strip())
+        title = normalize_title_redaction_markers(remove_cjk_spaces(raw_json.get('s1', '').strip()))
         # Normalize middle dot variants to standard middle dot (·)
         title = re.sub(r'[．‧•･・]', '·', title)
         wenshu_id = raw_json.get('wsKey', '').strip()
-        court_s2 = remove_cjk_spaces(raw_json.get('s2', '').strip())
-        doc_id = raw_json.get('s7', '').strip()
-        s22 = remove_cjk_spaces(raw_json.get('s22', '').strip())
+        court_s2 = normalize_redaction_markers(remove_cjk_spaces(raw_json.get('s2', '').strip()))
+        doc_id = normalize_redaction_markers(raw_json.get('s7', '').strip())
+        s22 = normalize_redaction_markers(remove_cjk_spaces(raw_json.get('s22', '').strip()))
         html_content = raw_json.get('qwContent', '')
         
         if not title:
