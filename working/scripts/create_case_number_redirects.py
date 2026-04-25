@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -234,22 +235,33 @@ def post_query(
     data: dict[str, Any],
     maxlag: int,
 ) -> dict[str, Any]:
-    response = session.post(
-        API_URL,
-        data={
-            "action": "query",
-            "format": "json",
-            "formatversion": "2",
-            "maxlag": maxlag,
-            **data,
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if "error" in payload:
-        raise RuntimeError(payload["error"])
-    return payload
+    attempt = 0
+    while True:
+        response = session.post(
+            API_URL,
+            data={
+                "action": "query",
+                "format": "json",
+                "formatversion": "2",
+                "maxlag": maxlag,
+                **data,
+            },
+            timeout=60,
+        )
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", 60))
+            attempt += 1
+            console.print(
+                f"[yellow]Rate limited (429) — waiting {retry_after}s "
+                f"(retry #{attempt})…[/yellow]"
+            )
+            time.sleep(retry_after)
+            continue
+        response.raise_for_status()
+        payload = response.json()
+        if "error" in payload:
+            raise RuntimeError(payload["error"])
+        return payload
 
 
 def build_title_alias_map(payload: dict[str, Any]) -> dict[str, str]:
