@@ -147,7 +147,7 @@ def append_jsonl(handle, record: dict[str, Any]) -> None:
 
 
 def resolve_source_title(record: dict[str, Any]) -> str:
-    for key in ("final_title", "title"):
+    for key in ("name", "final_title", "title"):
         value = record.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -255,7 +255,7 @@ def post_query(
 def build_title_alias_map(payload: dict[str, Any]) -> dict[str, str]:
     alias_map: dict[str, str] = {}
     query = payload.get("query", {})
-    for key in ("normalized", "converted"):
+    for key in ("normalized", "converted", "redirects"):
         for entry in query.get(key, []):
             source = entry.get("from")
             target = entry.get("to")
@@ -286,6 +286,7 @@ def fetch_page_content_batch(
             session,
             {
                 "titles": "|".join(title_batch),
+                "redirects": "1",
                 "prop": "revisions",
                 "rvprop": "content",
                 "rvslots": "main",
@@ -457,6 +458,7 @@ def process_record_batch(
             )
             continue
 
+        content_title = source_page.get("canonical_title") or record["source_title"]
         metadata = parse_header_metadata(str(source_page.get("content", "")))
         if metadata is None:
             counts["missing_metadata"] += 1
@@ -502,7 +504,7 @@ def process_record_batch(
             continue
 
         redirect_title = build_redirect_title(metadata)
-        if redirect_title == record["source_title"]:
+        if redirect_title == content_title:
             counts["invalid_input"] += 1
             append_jsonl(
                 invalid_input_f,
@@ -512,6 +514,7 @@ def process_record_batch(
                     "line_number": record["line_number"],
                     "input_title": record["input_title"],
                     "source_title": record["source_title"],
+                    "content_title": content_title,
                     "redirect_title": redirect_title,
                     "wenshu_id": record["wenshu_id"],
                     "timestamp": utc_now_iso(),
@@ -521,6 +524,7 @@ def process_record_batch(
 
         prepared_record = {
             **record,
+            "content_title": content_title,
             "metadata": metadata,
             "redirect_title": redirect_title,
         }
@@ -586,13 +590,13 @@ def process_record_batch(
             )
             continue
 
-        redirect_text = build_redirect_text(record["source_title"])
+        redirect_text = build_redirect_text(record["content_title"])
         try:
             if not dry_run:
                 redirect_page = Page(site, redirect_title)
                 redirect_page.text = redirect_text
                 redirect_page.save(
-                    summary=build_edit_summary(record["source_title"]),
+                    summary=build_edit_summary(record["content_title"]),
                     minor=False,
                     botflag=True,
                 )
@@ -606,6 +610,7 @@ def process_record_batch(
                     "line_number": record["line_number"],
                     "input_title": record["input_title"],
                     "source_title": record["source_title"],
+                    "content_title": record["content_title"],
                     "redirect_title": redirect_title,
                     "wenshu_id": record["wenshu_id"],
                     "metadata": {
@@ -628,6 +633,7 @@ def process_record_batch(
                     "line_number": record["line_number"],
                     "input_title": record["input_title"],
                     "source_title": record["source_title"],
+                    "content_title": record["content_title"],
                     "redirect_title": redirect_title,
                     "wenshu_id": record["wenshu_id"],
                     "error": str(exc),
