@@ -8,6 +8,7 @@ Rate limiting is handled by pywikibot's built-in throttle (put_throttle setting)
 """
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Callable, Any
 
@@ -64,6 +65,18 @@ DEFAULT_EDIT_INTERVAL = 3.0  # seconds between edits
 DEFAULT_MAXLAG = 5
 
 _site: Optional[Site] = None
+
+
+@dataclass
+class ResolvedPage:
+    """Resolved page state after following redirects."""
+    requested_title: str
+    exists: bool
+    page_id: Optional[int] = None
+    is_redirect: bool = False
+    redirect_target: Optional[str] = None
+    resolved_title: Optional[str] = None
+    content: Optional[str] = None
 
 
 def _ensure_credentials() -> Tuple[str, str]:
@@ -144,6 +157,66 @@ def get_page_content(title: str) -> Tuple[bool, Optional[str]]:
     if page.exists():
         return True, page.text
     return False, None
+
+
+def resolve_page(title: str, max_redirects: int = 10) -> ResolvedPage:
+    """
+    Resolve a title to its landing page, following redirects when possible.
+
+    Args:
+        title: Title to inspect
+        max_redirects: Maximum redirect hops to follow
+
+    Returns:
+        ResolvedPage describing the requested title and landing content
+    """
+    site = get_site()
+    page = Page(site, title)
+
+    if not page.exists():
+        return ResolvedPage(
+            requested_title=title,
+            exists=False,
+        )
+
+    page_id = page.pageid
+    current = page
+    seen = {current.title()}
+    is_redirect = False
+    redirect_target = None
+
+    for _ in range(max_redirects):
+        if not current.isRedirectPage():
+            return ResolvedPage(
+                requested_title=title,
+                exists=True,
+                page_id=page_id,
+                is_redirect=is_redirect,
+                redirect_target=redirect_target,
+                resolved_title=current.title(),
+                content=current.text,
+            )
+
+        is_redirect = True
+        target = current.getRedirectTarget()
+        redirect_target = target.title()
+        if target.title() in seen:
+            raise ValueError(f"Redirect loop detected while resolving [[{title}]]")
+        seen.add(target.title())
+        current = target
+
+        if not current.exists():
+            return ResolvedPage(
+                requested_title=title,
+                exists=True,
+                page_id=page_id,
+                is_redirect=True,
+                redirect_target=redirect_target,
+                resolved_title=current.title(),
+                content=None,
+            )
+
+    raise ValueError(f"Too many redirects while resolving [[{title}]]")
 
 
 def save_page(

@@ -3,77 +3,79 @@ Conflict resolution for duplicate page titles.
 
 Handles two scenarios:
 1. Existing page is a {{versions}} page - add new entry to it
-2. Existing page is a {{header}} page from same court - create versions page and move existing
+2. Existing page is a {{Header/裁判文书}} page from same court - create a
+   versions page and move or relocate the existing document to its case title
 """
 
 import re
 from typing import Optional, Tuple, Callable, List
 
-from .mediawiki import get_page_content, save_page, move_page
+from .mediawiki import get_page_content, save_page, move_page, resolve_page
+from .page_metadata import (
+    build_case_title_from_content,
+    build_case_title_from_metadata,
+    is_header_page,
+    is_versions_page,
+    parse_header_metadata,
+    parse_versions_metadata,
+)
 
-
-# Type alias for conflict check result
-ConflictCheckResult = Tuple[bool, str]
 
 # Type for log callback: (message, is_success) -> None
 LogCallback = Callable[[str, bool], None]
 
 
-def extract_noauthor_from_content(content: str) -> Optional[str]:
-    """Extract the noauthor field from wikitext content."""
-    match = re.search(r"\|\s*noauthor\s*=\s*([^\n|]+)", content)
-    if match:
-        return match.group(1).strip()
-    return None
+def extract_versions_noauthor(content: str) -> Optional[str]:
+    """Extract the noauthor field from a {{Versions}} page."""
+    metadata = parse_versions_metadata(content)
+    if not metadata:
+        return None
+    value = metadata.get("noauthor", "").strip()
+    return value or None
 
 
-def extract_court_and_doctype_from_content(
-    content: str,
-) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Extract court name and document type from {{larger}} templates.
-
-    Returns (court_name, doc_type) - doc_type has whitespace removed.
-    """
-    larger_matches = re.findall(r"\{\{larger\|([^}]+)\}\}", content)
-    if len(larger_matches) >= 2:
-        court_name = larger_matches[0].strip()
-        doc_type = re.sub(r"\s+", "", larger_matches[1].strip())
-        return court_name, doc_type
-    elif len(larger_matches) == 1:
-        return larger_matches[0].strip(), None
-    return None, None
+def extract_header_metadata(content: str) -> Optional[dict[str, str]]:
+    """Extract current-format header metadata from page content."""
+    metadata = parse_header_metadata(content)
+    if not metadata:
+        return None
+    return metadata
 
 
-def extract_case_number_from_content(content: str) -> Optional[str]:
-    """Extract case number from <div align="right">...</div> block."""
-    match = re.search(
-        r'<div\s+align\s*=\s*["\']?right["\']?\s*>\s*\n?([^<]+)', content, re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip()
-    return None
+def extract_header_title(content: str) -> Optional[str]:
+    """Extract the title field from {{Header/裁判文书}}."""
+    metadata = extract_header_metadata(content)
+    if not metadata:
+        return None
+    value = metadata.get("title", "").strip()
+    return value or None
+
+
+def extract_header_court(content: str) -> Optional[str]:
+    """Extract the court field from {{Header/裁判文书}}."""
+    metadata = extract_header_metadata(content)
+    if not metadata:
+        return None
+    value = metadata.get("court", "").strip()
+    return value or None
 
 
 def extract_header_type_from_content(content: str) -> Optional[str]:
-    """Extract the type field from {{header}} template."""
-    match = re.search(r"\|\s*type\s*=\s*([^\n|]+)", content)
-    if match:
-        return match.group(1).strip()
-    return None
+    """Extract the type field from {{Header/裁判文书}}."""
+    metadata = extract_header_metadata(content)
+    if not metadata:
+        return None
+    value = metadata.get("type", "").strip()
+    return value or None
 
 
 def extract_header_year_from_content(content: str) -> Optional[str]:
-    """Extract the year field from {{header}} template."""
-    match = re.search(r"\|\s*year\s*=\s*(\d+)", content)
-    if match:
-        return match.group(1).strip()
-    return None
-
-
-def build_new_page_title(court: str, case_number: str, doc_type: str) -> str:
-    """Build new page title in format: [court][case_number][doc_type]."""
-    return f"{court}{case_number}{doc_type}"
+    """Extract the year field from {{Header/裁判文书}}."""
+    metadata = extract_header_metadata(content)
+    if not metadata:
+        return None
+    value = metadata.get("year", "").strip()
+    return value or None
 
 
 def add_title_link_to_content(content: str, original_title: str) -> str:
@@ -196,39 +198,42 @@ def try_resolve_conflict(
     Returns:
         (resolved, new_draft_title, error_message)
     """
-    draft_noauthor = extract_noauthor_from_content(draft_content)
-    existing_noauthor = extract_noauthor_from_content(existing_content)
+    draft_metadata = extract_header_metadata(draft_content)
+    if not draft_metadata:
+        return False, None, "Could not extract {{Header/裁判文书}} metadata from draft content"
 
-    if not draft_noauthor:
-        return False, None, "Could not extract noauthor from draft content"
+    draft_court = draft_metadata.get("court", "").strip()
+    if not draft_court:
+        return False, None, "Could not extract court from draft header"
 
     # Check if existing page is a versions page
-    if existing_content.strip().startswith("{{versions"):
+    if is_versions_page(existing_content):
         return _resolve_versions_page_conflict(
             original_title,
             draft_content,
             existing_content,
-            draft_noauthor,
+            draft_court,
             log_callback,
         )
 
     # Check if existing page is a header page
-    if existing_content.strip().startswith("{{header"):
-        if existing_noauthor != draft_noauthor:
+    if is_header_page(existing_content):
+        existing_court = extract_header_court(existing_content)
+        if existing_court != draft_court:
             return (
                 False,
                 None,
-                f"Court mismatch: existing='{existing_noauthor}', draft='{draft_noauthor}'",
+                f"Court mismatch: existing='{existing_court}', draft='{draft_court}'",
             )
         return _resolve_header_page_conflict(
             original_title,
             draft_content,
             existing_content,
-            draft_noauthor,
+            draft_court,
             log_callback,
         )
 
-    return False, None, "Existing page is neither {{versions}} nor {{header}} page"
+    return False, None, "Existing page is neither {{Versions}} nor {{Header/裁判文书}}"
 
 
 def _resolve_versions_page_conflict(
@@ -246,28 +251,17 @@ def _resolve_versions_page_conflict(
 
     log(f"Detected existing {{{{versions}}}} page: [[{original_title}]]", True)
 
-    existing_noauthor = extract_noauthor_from_content(existing_content)
-    if existing_noauthor != draft_noauthor:
+    existing_noauthor = extract_versions_noauthor(existing_content)
+    if existing_noauthor and existing_noauthor != draft_noauthor:
         return (
             False,
             None,
             f"Court mismatch with versions page: existing='{existing_noauthor}', draft='{draft_noauthor}'",
         )
 
-    # Extract court and doc_type from draft
-    court, doc_type = extract_court_and_doctype_from_content(draft_content)
-    if not court or not doc_type:
-        return (
-            False,
-            None,
-            "Could not extract court/doc_type from draft {{larger}} templates",
-        )
-
-    case_number = extract_case_number_from_content(draft_content)
-    if not case_number:
-        return False, None, "Could not extract case number from draft"
-
-    new_draft_title = build_new_page_title(court, case_number, doc_type)
+    new_draft_title = build_case_title_from_content(draft_content)
+    if not new_draft_title:
+        return False, None, "Could not extract case-number title from draft"
     log(f"New draft title: [[{new_draft_title}]]", True)
 
     # Update versions page with new entry
@@ -293,65 +287,73 @@ def _resolve_header_page_conflict(
     court: str,
     log_callback: Optional[LogCallback] = None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Resolve conflict when existing page is a {{header}} page from same court."""
+    """Resolve conflict when existing page is a {{Header/裁判文书}} page."""
 
     def log(msg: str, ok: bool = True):
         if log_callback:
             log_callback(msg, ok)
 
     log(
-        f"Detected existing {{{{header}}}} page from same court: [[{original_title}]]",
+        f"Detected existing {{{{Header/裁判文书}}}} page from same court: [[{original_title}]]",
         True,
     )
 
-    # Extract info from draft
-    draft_court, draft_doc_type = extract_court_and_doctype_from_content(draft_content)
-    draft_case_number = extract_case_number_from_content(draft_content)
+    draft_metadata = extract_header_metadata(draft_content)
+    existing_metadata = extract_header_metadata(existing_content)
+    if not draft_metadata or not existing_metadata:
+        return False, None, "Could not extract current header metadata"
 
-    if not draft_court or not draft_doc_type or not draft_case_number:
-        return False, None, "Could not extract court/doc_type/case_number from draft"
+    new_existing_title = build_case_title_from_metadata(existing_metadata)
+    new_draft_title = build_case_title_from_metadata(draft_metadata)
+    existing_court = existing_metadata.get("court", "").strip()
+    existing_header_type = existing_metadata.get("type", "").strip()
+    existing_year = existing_metadata.get("year", "").strip()
 
-    # Extract info from existing page
-    existing_court, existing_doc_type = extract_court_and_doctype_from_content(
-        existing_content
-    )
-    existing_case_number = extract_case_number_from_content(existing_content)
-    existing_header_type = extract_header_type_from_content(existing_content)
-    existing_year = extract_header_year_from_content(existing_content)
-
-    if not existing_court or not existing_doc_type or not existing_case_number:
-        return (
-            False,
-            None,
-            "Could not extract court/doc_type/case_number from existing page",
-        )
-    if not existing_header_type or not existing_year:
-        return False, None, "Could not extract type/year from existing page header"
-
-    # Build new titles
-    new_existing_title = build_new_page_title(
-        existing_court, existing_case_number, existing_doc_type
-    )
-    new_draft_title = build_new_page_title(
-        draft_court, draft_case_number, draft_doc_type
-    )
+    if not new_existing_title or not new_draft_title:
+        return False, None, "Could not build case-number title from header metadata"
+    if not existing_court or not existing_header_type or not existing_year:
+        return False, None, "Could not extract court/type/year from existing page header"
+    if new_existing_title == new_draft_title:
+        return False, None, "Existing page already uses the same case-number title as the draft"
 
     log(f"Will move existing page to: [[{new_existing_title}]]", True)
     log(f"New draft title: [[{new_draft_title}]]", True)
 
-    # Step 1: Move existing page to new title
+    # Step 1: Move existing page to new title, or replace an existing redirect there.
     try:
-        move_page(
-            original_title,
-            new_existing_title,
-            reason=f"移动至具体案号页面，原标题改为版本页：[[{original_title}]]",
-            leave_redirect=True,
-        )
-        log(f"Moved [[{original_title}]] → [[{new_existing_title}]]", True)
+        target_state = resolve_page(new_existing_title)
+        if not target_state.exists:
+            move_page(
+                original_title,
+                new_existing_title,
+                reason=f"移动至具体案号页面，原标题改为版本页：[[{original_title}]]",
+                leave_redirect=True,
+            )
+            log(f"Moved [[{original_title}]] → [[{new_existing_title}]]", True)
+        elif target_state.is_redirect:
+            save_page(
+                new_existing_title,
+                existing_content,
+                summary=f"以具体案号页面替换重定向：[[{original_title}]]",
+            )
+            log(
+                f"Replaced redirect [[{new_existing_title}]] with existing document content",
+                True,
+            )
+        elif target_state.content and is_header_page(target_state.content):
+            existing_target_title = build_case_title_from_content(target_state.content)
+            if existing_target_title != new_existing_title:
+                return False, None, f"Target page already exists at {new_existing_title}"
+            log(
+                f"Case-number page [[{new_existing_title}]] already exists as a document page",
+                True,
+            )
+        else:
+            return False, None, f"Target page already exists at {new_existing_title}"
     except Exception as e:
         return False, None, f"Failed to move existing page: {e}"
 
-    # Step 2: Edit moved page to add [[...]] to title field
+    # Step 2: Edit case-specific page to add [[...]] to the title field
     try:
         exists, moved_content = get_page_content(new_existing_title)
         if not exists or not moved_content:
@@ -362,12 +364,13 @@ def _resolve_header_page_conflict(
             )
 
         updated_existing = add_title_link_to_content(moved_content, original_title)
-        save_page(
-            new_existing_title,
-            updated_existing,
-            summary=f"更新标题链接至版本页：[[{original_title}]]",
-        )
-        log(f"Updated [[{new_existing_title}]] with title link to versions page", True)
+        if updated_existing != moved_content:
+            save_page(
+                new_existing_title,
+                updated_existing,
+                summary=f"更新标题链接至版本页：[[{original_title}]]",
+            )
+            log(f"Updated [[{new_existing_title}]] with title link to versions page", True)
     except Exception as e:
         return False, None, f"Failed to update moved page: {e}"
 
@@ -411,23 +414,28 @@ def is_conflict_resolvable(
     if not existing_content or not draft_content:
         return False, "Missing content"
 
-    draft_noauthor = extract_noauthor_from_content(draft_content)
-    existing_noauthor = extract_noauthor_from_content(existing_content)
+    draft_metadata = extract_header_metadata(draft_content)
+    if not draft_metadata:
+        return False, "Could not extract draft {{Header/裁判文书}} metadata"
+
+    draft_court = draft_metadata.get("court", "").strip()
+    if not draft_court:
+        return False, "Could not extract court from draft header"
 
     # Check if existing page is a versions page
-    if existing_content.strip().lower().startswith("{{versions"):
-        if not draft_noauthor:
-            return False, "Could not extract court from draft"
-        if existing_noauthor and existing_noauthor != draft_noauthor:
-            return False, f"Court mismatch with versions page"
+    if is_versions_page(existing_content):
+        existing_noauthor = extract_versions_noauthor(existing_content)
+        if existing_noauthor and existing_noauthor != draft_court:
+            return False, "Court mismatch with versions page"
         return True, "Existing page is a {{versions}} page"
 
     # Check if existing page is a header page from same court
-    if existing_content.strip().lower().startswith("{{header"):
-        if not draft_noauthor or not existing_noauthor:
-            return False, "Could not extract court info"
-        if existing_noauthor != draft_noauthor:
-            return False, f"Court mismatch: different courts"
-        return True, "Existing page is a {{header}} page from same court"
+    if is_header_page(existing_content):
+        existing_court = extract_header_court(existing_content)
+        if not existing_court:
+            return False, "Could not extract existing court info"
+        if existing_court != draft_court:
+            return False, "Court mismatch: different courts"
+        return True, "Existing page is a {{Header/裁判文书}} page from same court"
 
-    return False, "Existing page is neither {{versions}} nor {{header}}"
+    return False, "Existing page is neither {{Versions}} nor {{Header/裁判文书}}"

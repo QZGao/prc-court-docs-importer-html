@@ -8,18 +8,17 @@ Rate limiting is handled by pywikibot's built-in throttle.
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn, SpinnerColumn
 from rich.console import Console
-from rich.logging import RichHandler
 
 from .mediawiki import (
-    get_site,
     check_page_exists,
     get_page_content,
+    resolve_page,
     save_page,
 )
 from .conflict_resolution import (
@@ -27,8 +26,19 @@ from .conflict_resolution import (
     try_resolve_conflict,
     update_draft_for_conflict_resolution,
 )
+from .page_metadata import (
+    build_case_redirect_summary,
+    build_case_redirect_text,
+    build_case_title_from_content,
+    is_header_page,
+)
 
 console = Console()
+
+
+def utc_now_iso() -> str:
+    """Return the current UTC timestamp in ISO8601-with-Z format."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -38,6 +48,8 @@ class UploadResult:
     wenshu_id: str
     status: str  # 'uploaded', 'skipped', 'conflict_resolved', 'failed', 'overwritable'
     final_title: Optional[str] = None  # Different from title if conflict resolved
+    case_title: Optional[str] = None
+    redirect_status: Optional[str] = None
     message: str = ""
     timestamp: str = ""
     wikitext: Optional[str] = None  # Included for overwritable entries
@@ -47,6 +59,95 @@ def build_edit_summary(wenshu_id: str) -> str:
     """Build a standardized edit summary."""
     # return f"Imported from 裁判文书网 (credit: caseopen.org), source: https://wenshu.court.gov.cn/website/wenshu/181107ANFZ0BXSK4/index.html?docId={wenshu_id}"
     return "Imported from 裁判文书网 (credit: caseopen.org)"
+
+
+def _append_message(message: str, extra: str) -> str:
+    """Append a short suffix to an existing status message."""
+    if not message:
+        return extra
+    return f"{message}; {extra}"
+
+
+def _is_header_landing_page(page_state) -> bool:
+    """Return whether a resolved page lands on a real court-document page."""
+    return bool(page_state and page_state.exists and page_state.content and is_header_page(page_state.content))
+
+
+def _same_case_document(existing_content: str, draft_content: str) -> bool:
+    """Return whether two header pages resolve to the same canonical case title."""
+    existing_case_title = build_case_title_from_content(existing_content)
+    draft_case_title = build_case_title_from_content(draft_content)
+    return bool(existing_case_title and existing_case_title == draft_case_title)
+
+
+def ensure_case_number_redirect(final_title: str, wikitext: str) -> Tuple[Optional[str], str]:
+    """
+    Ensure the case-number redirect exists for an uploaded document.
+
+    Returns:
+        (case_title, redirect_status)
+    """
+    case_title = build_case_title_from_content(wikitext)
+    if not case_title:
+        return None, "missing_case_title"
+
+    if case_title == final_title:
+        return case_title, "not_needed"
+
+    page_state = resolve_page(case_title)
+    if not page_state.exists:
+        save_page(
+            case_title,
+            build_case_redirect_text(final_title),
+            build_case_redirect_summary(final_title),
+        )
+        return case_title, "created"
+
+    if page_state.is_redirect and page_state.resolved_title == final_title:
+        return case_title, "existing"
+
+    if _is_header_landing_page(page_state):
+        if page_state.resolved_title == final_title:
+            return case_title, "existing"
+        return case_title, "occupied_by_document"
+
+    if page_state.is_redirect:
+        save_page(
+            case_title,
+            build_case_redirect_text(final_title),
+            build_case_redirect_summary(final_title),
+        )
+        return case_title, "updated"
+
+    return case_title, "occupied"
+
+
+def _attach_case_redirect(result: UploadResult, final_title: str, wikitext: str) -> UploadResult:
+    """Populate case-title metadata and create/update redirect when safe."""
+    try:
+        case_title, redirect_status = ensure_case_number_redirect(final_title, wikitext)
+    except Exception as e:
+        result.case_title = build_case_title_from_content(wikitext)
+        result.redirect_status = "failed"
+        result.message = _append_message(result.message, f"Case-number redirect failed: {e}")
+        return result
+
+    result.case_title = case_title
+    result.redirect_status = redirect_status
+
+    if redirect_status == "created":
+        result.message = _append_message(result.message, f"Created case-number redirect: {case_title}")
+    elif redirect_status == "updated":
+        result.message = _append_message(result.message, f"Updated case-number redirect: {case_title}")
+    elif redirect_status == "occupied":
+        result.message = _append_message(result.message, f"Case-number title occupied: {case_title}")
+    elif redirect_status == "occupied_by_document":
+        result.message = _append_message(
+            result.message,
+            f"Case-number title already lands on document page: {case_title}",
+        )
+
+    return result
 
 
 def upload_document(
@@ -70,37 +171,55 @@ def upload_document(
     Returns:
         UploadResult with status and details
     """
-    timestamp = datetime.utcnow().isoformat() + "Z"
+    timestamp = utc_now_iso()
+    case_title = build_case_title_from_content(wikitext)
+
+    try:
+        case_page = resolve_page(case_title) if case_title else None
+    except Exception as e:
+        return UploadResult(
+            title=title,
+            wenshu_id=wenshu_id,
+            status='failed',
+            final_title=title,
+            case_title=case_title,
+            message=f"Failed to resolve case-number title: {e}",
+            timestamp=timestamp,
+        )
 
     # Force-overwrite mode: skip existence check and write directly
     if force_overwrite:
         try:
             save_page(title, wikitext, build_edit_summary(wenshu_id))
-            return UploadResult(
+            return _attach_case_redirect(UploadResult(
                 title=title,
                 wenshu_id=wenshu_id,
                 status='uploaded',
                 final_title=title,
                 message="Overwritten successfully",
                 timestamp=timestamp,
-            )
+            ), title, wikitext)
         except Exception as e:
             return UploadResult(
                 title=title,
                 wenshu_id=wenshu_id,
                 status='failed',
+                final_title=title,
+                case_title=case_title,
                 message=f"Failed to overwrite: {e}",
                 timestamp=timestamp,
             )
 
     # Check if page exists
     try:
-        exists, page_id = check_page_exists(title)
+        exists, _ = check_page_exists(title)
     except Exception as e:
         return UploadResult(
             title=title,
             wenshu_id=wenshu_id,
             status='failed',
+            final_title=title,
+            case_title=case_title,
             message=f"Failed to check page existence: {e}",
             timestamp=timestamp,
         )
@@ -113,13 +232,24 @@ def upload_document(
                 if existing_content:
                     # Check if content is identical
                     if wikitext.strip() == existing_content.strip():
-                        return UploadResult(
+                        return _attach_case_redirect(UploadResult(
                             title=title,
                             wenshu_id=wenshu_id,
                             status='skipped',
+                            final_title=title,
                             message="Content identical to existing page",
                             timestamp=timestamp,
-                        )
+                        ), title, wikitext)
+
+                    if is_header_page(existing_content) and _same_case_document(existing_content, wikitext):
+                        return _attach_case_redirect(UploadResult(
+                            title=title,
+                            wenshu_id=wenshu_id,
+                            status='skipped',
+                            final_title=title,
+                            message="Case number already exists at the original title",
+                            timestamp=timestamp,
+                        ), title, wikitext)
                     
                     # Check if conflict is resolvable
                     is_resolvable, scenario = is_conflict_resolvable(
@@ -140,14 +270,27 @@ def upload_document(
                             
                             # Check if new title already exists
                             try:
-                                new_exists, _ = check_page_exists(new_title)
-                                if new_exists:
-                                    # Case-specific page exists - mark as overwritable
+                                new_page = resolve_page(new_title)
+                                if new_page.exists:
+                                    if _is_header_landing_page(new_page):
+                                        return UploadResult(
+                                            title=title,
+                                            wenshu_id=wenshu_id,
+                                            status='skipped',
+                                            final_title=new_page.resolved_title,
+                                            case_title=case_title or new_title,
+                                            redirect_status='existing',
+                                            message=f"Case-specific page already exists: {new_page.resolved_title}",
+                                            timestamp=timestamp,
+                                        )
+
+                                    # Case-specific page exists but does not land on a real document page.
                                     return UploadResult(
                                         title=title,
                                         wenshu_id=wenshu_id,
                                         status='overwritable',
                                         final_title=new_title,
+                                        case_title=case_title or new_title,
                                         message=f"Case-specific page already exists: {new_title}",
                                         timestamp=timestamp,
                                         wikitext=updated_wikitext,
@@ -157,6 +300,8 @@ def upload_document(
                                     title=title,
                                     wenshu_id=wenshu_id,
                                     status='failed',
+                                    final_title=new_title,
+                                    case_title=case_title or new_title,
                                     message=f"Failed to check new title existence: {e}",
                                     timestamp=timestamp,
                                 )
@@ -169,19 +314,21 @@ def upload_document(
                                     updated_wikitext,
                                     build_edit_summary(wenshu_id),
                                 )
-                                return UploadResult(
+                                return _attach_case_redirect(UploadResult(
                                     title=title,
                                     wenshu_id=wenshu_id,
                                     status='conflict_resolved',
                                     final_title=new_title,
                                     message=f"Resolved: {scenario}",
                                     timestamp=timestamp,
-                                )
+                                ), new_title, updated_wikitext)
                             except Exception as e:
                                 return UploadResult(
                                     title=title,
                                     wenshu_id=wenshu_id,
                                     status='failed',
+                                    final_title=new_title,
+                                    case_title=case_title or new_title,
                                     message=f"Failed to save after conflict resolution: {e}",
                                     timestamp=timestamp,
                                 )
@@ -190,59 +337,111 @@ def upload_document(
                                 title=title,
                                 wenshu_id=wenshu_id,
                                 status='failed',
+                                final_title=title,
+                                case_title=case_title,
                                 message=f"Conflict resolution failed: {error}",
                                 timestamp=timestamp,
                             )
                     else:
+                        if _is_header_landing_page(case_page):
+                            return UploadResult(
+                                title=title,
+                                wenshu_id=wenshu_id,
+                                status='skipped',
+                                final_title=case_page.resolved_title,
+                                case_title=case_title,
+                                redirect_status='existing',
+                                message=f"Case-number page already exists: {case_page.resolved_title}",
+                                timestamp=timestamp,
+                            )
                         # Not resolvable - mark as overwritable for manual review
                         return UploadResult(
                             title=title,
                             wenshu_id=wenshu_id,
                             status='overwritable',
                             final_title=title,
+                            case_title=case_title,
                             message=f"Page exists, conflict not resolvable: {scenario}",
                             timestamp=timestamp,
                             wikitext=wikitext,
                         )
+                return UploadResult(
+                    title=title,
+                    wenshu_id=wenshu_id,
+                    status='failed',
+                    final_title=title,
+                    case_title=case_title,
+                    message="Page exists but content could not be fetched",
+                    timestamp=timestamp,
+                )
             except Exception as e:
                 return UploadResult(
                     title=title,
                     wenshu_id=wenshu_id,
                     status='failed',
+                    final_title=title,
+                    case_title=case_title,
                     message=f"Error during conflict check: {e}",
                     timestamp=timestamp,
                 )
         else:
+            if _is_header_landing_page(case_page):
+                return UploadResult(
+                    title=title,
+                    wenshu_id=wenshu_id,
+                    status='skipped',
+                    final_title=case_page.resolved_title,
+                    case_title=case_title,
+                    redirect_status='existing',
+                    message=f"Case-number page already exists: {case_page.resolved_title}",
+                    timestamp=timestamp,
+                )
             # Skip without conflict resolution
             return UploadResult(
                 title=title,
                 wenshu_id=wenshu_id,
                 status='skipped',
+                final_title=title,
+                case_title=case_title,
                 message="Page already exists",
                 timestamp=timestamp,
             )
     
     # Page doesn't exist - create it
+    if _is_header_landing_page(case_page):
+        return UploadResult(
+            title=title,
+            wenshu_id=wenshu_id,
+            status='skipped',
+            final_title=case_page.resolved_title,
+            case_title=case_title,
+            redirect_status='existing',
+            message=f"Case-number page already exists: {case_page.resolved_title}",
+            timestamp=timestamp,
+        )
+
     try:
         save_page(
             title,
             wikitext,
             build_edit_summary(wenshu_id),
         )
-        return UploadResult(
+        return _attach_case_redirect(UploadResult(
             title=title,
             wenshu_id=wenshu_id,
             status='uploaded',
             final_title=title,
             message="Created successfully",
             timestamp=timestamp,
-        )
+        ), title, wikitext)
     except Exception as e:
         # pywikibot handles maxlag automatically via config.maxlag
         return UploadResult(
             title=title,
             wenshu_id=wenshu_id,
             status='failed',
+            final_title=title,
+            case_title=case_title,
             message=f"Failed to save: {e}",
             timestamp=timestamp,
         )
@@ -334,7 +533,7 @@ def process_upload_batch(
                     error_entry = {
                         "line_num": doc_num,
                         "error": f"JSON parse error: {e}",
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": utc_now_iso(),
                     }
                     failed_f.write(json.dumps(error_entry, ensure_ascii=False) + '\n')
                     failed_count += 1
@@ -358,7 +557,7 @@ def process_upload_batch(
                         "title": title,
                         "wenshu_id": wenshu_id,
                         "error": "Missing title or wikitext",
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": utc_now_iso(),
                     }
                     failed_f.write(json.dumps(error_entry, ensure_ascii=False) + '\n')
                     failed_count += 1
