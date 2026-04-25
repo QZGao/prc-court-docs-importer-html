@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Callable, Any
+import requests
 
 # Project root directory (where this module's package lives)
 # MUST be set before importing pywikibot!
@@ -63,8 +64,22 @@ SITE_FAMILY = 'wikisource'
 # Default rate limits
 DEFAULT_EDIT_INTERVAL = 3.0  # seconds between edits
 DEFAULT_MAXLAG = 5
+DEFAULT_READ_BATCH_SIZE = 20
+API_URL = "https://zh.wikisource.org/w/api.php"
+USER_AGENT = "prc-court-docs-importer-html/1.0 (SuperGrey)"
 
 _site: Optional[Site] = None
+_api_session: Optional[requests.Session] = None
+
+
+@dataclass
+class PageSnapshot:
+    """Direct page snapshot without following redirects."""
+    requested_title: str
+    exists: bool
+    page_id: Optional[int] = None
+    canonical_title: Optional[str] = None
+    content: Optional[str] = None
 
 
 @dataclass
@@ -121,6 +136,225 @@ def get_site() -> Site:
         _site = pywikibot.Site(SITE_CODE, SITE_FAMILY)
         _site.login()
     return _site
+
+
+def get_api_session() -> requests.Session:
+    """Get or create the shared read-only API session."""
+    global _api_session
+
+    if _api_session is None:
+        _api_session = requests.Session()
+        _api_session.headers.update({"User-Agent": USER_AGENT})
+
+    return _api_session
+
+
+def batched(items: list[str], batch_size: int) -> list[list[str]]:
+    """Split a list into fixed-size batches."""
+    return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def post_query(data: dict[str, Any], maxlag: int = DEFAULT_MAXLAG) -> dict[str, Any]:
+    """Perform a read-only MediaWiki API query."""
+    response = get_api_session().post(
+        API_URL,
+        data={
+            "action": "query",
+            "format": "json",
+            "formatversion": "2",
+            "maxlag": maxlag,
+            **data,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if "error" in payload:
+        raise RuntimeError(payload["error"])
+    return payload
+
+
+def build_title_alias_map(payload: dict[str, Any], include_redirects: bool = False) -> dict[str, str]:
+    """Build a title alias map from normalized, converted, and optional redirect entries."""
+    alias_map: dict[str, str] = {}
+    query = payload.get("query", {})
+
+    for key in ("normalized", "converted"):
+        for entry in query.get(key, []):
+            source = entry.get("from")
+            target = entry.get("to")
+            if source and target:
+                alias_map[source] = target
+
+    if include_redirects:
+        for entry in query.get("redirects", []):
+            source = entry.get("from")
+            target = entry.get("to")
+            if source and target:
+                alias_map[source] = target
+
+    return alias_map
+
+
+def resolve_canonical_title(title: str, alias_map: dict[str, str]) -> str:
+    """Follow alias mappings until the canonical title is reached."""
+    seen: set[str] = set()
+    current = title
+    while current in alias_map and current not in seen:
+        seen.add(current)
+        current = alias_map[current]
+    return current
+
+
+def _extract_page_record(page: dict[str, Any]) -> dict[str, Any]:
+    """Extract common page fields from an API page object."""
+    entry = {
+        "title": page.get("title", ""),
+        "exists": "missing" not in page,
+        "page_id": page.get("pageid"),
+        "content": None,
+    }
+
+    if entry["exists"]:
+        revisions = page.get("revisions") or []
+        if revisions:
+            slots = revisions[0].get("slots") or {}
+            main_slot = slots.get("main") or {}
+            entry["content"] = main_slot.get("content", "")
+
+    return entry
+
+
+def fetch_page_content_batch(
+    titles: list[str],
+    batch_size: int = DEFAULT_READ_BATCH_SIZE,
+    maxlag: int = DEFAULT_MAXLAG,
+) -> dict[str, PageSnapshot]:
+    """
+    Fetch direct page snapshots for titles without following redirects.
+
+    The returned content is the content stored at the requested title itself,
+    which may be redirect wikitext.
+    """
+    results: dict[str, PageSnapshot] = {}
+
+    for title_batch in batched(list(dict.fromkeys(titles)), batch_size):
+        payload = post_query(
+            {
+                "titles": "|".join(title_batch),
+                "prop": "revisions",
+                "rvprop": "content",
+                "rvslots": "main",
+            },
+            maxlag=maxlag,
+        )
+
+        alias_map = build_title_alias_map(payload)
+        page_map = {
+            page.get("title", ""): _extract_page_record(page)
+            for page in payload.get("query", {}).get("pages", [])
+        }
+
+        for requested_title in title_batch:
+            canonical_title = resolve_canonical_title(requested_title, alias_map)
+            page = page_map.get(canonical_title) or page_map.get(requested_title)
+            if page is None:
+                results[requested_title] = PageSnapshot(
+                    requested_title=requested_title,
+                    exists=False,
+                    canonical_title=canonical_title,
+                )
+                continue
+
+            results[requested_title] = PageSnapshot(
+                requested_title=requested_title,
+                exists=bool(page["exists"]),
+                page_id=page["page_id"] if page["exists"] else None,
+                canonical_title=page["title"] or canonical_title,
+                content=page["content"] if page["exists"] else None,
+            )
+
+    return results
+
+
+def resolve_pages_batch(
+    titles: list[str],
+    batch_size: int = DEFAULT_READ_BATCH_SIZE,
+    maxlag: int = DEFAULT_MAXLAG,
+) -> dict[str, ResolvedPage]:
+    """
+    Resolve titles to landing pages in batch, following redirects via the API.
+
+    This is intended for read-side existence checks and redirect landing-page
+    inspection before uploads.
+    """
+    results: dict[str, ResolvedPage] = {}
+
+    for title_batch in batched(list(dict.fromkeys(titles)), batch_size):
+        payload = post_query(
+            {
+                "titles": "|".join(title_batch),
+                "redirects": "1",
+                "prop": "revisions",
+                "rvprop": "content",
+                "rvslots": "main",
+            },
+            maxlag=maxlag,
+        )
+
+        normalize_map = build_title_alias_map(payload, include_redirects=False)
+        redirect_map = build_title_alias_map(payload, include_redirects=True)
+        page_map = {
+            page.get("title", ""): _extract_page_record(page)
+            for page in payload.get("query", {}).get("pages", [])
+        }
+
+        query = payload.get("query", {})
+        first_hop_redirects = {
+            entry.get("from"): entry.get("to")
+            for entry in query.get("redirects", [])
+            if entry.get("from") and entry.get("to")
+        }
+
+        for requested_title in title_batch:
+            normalized_title = resolve_canonical_title(requested_title, normalize_map)
+            resolved_title = resolve_canonical_title(normalized_title, redirect_map)
+            page = page_map.get(resolved_title) or page_map.get(normalized_title) or page_map.get(requested_title)
+            is_redirect = normalized_title in first_hop_redirects
+            redirect_target = first_hop_redirects.get(normalized_title)
+
+            if page is None:
+                results[requested_title] = ResolvedPage(
+                    requested_title=requested_title,
+                    exists=False,
+                    is_redirect=is_redirect,
+                    redirect_target=redirect_target,
+                    resolved_title=resolved_title if resolved_title != requested_title else None,
+                )
+                continue
+
+            if is_redirect and not page["exists"]:
+                results[requested_title] = ResolvedPage(
+                    requested_title=requested_title,
+                    exists=True,
+                    is_redirect=True,
+                    redirect_target=redirect_target,
+                    resolved_title=resolved_title,
+                    content=None,
+                )
+                continue
+
+            results[requested_title] = ResolvedPage(
+                requested_title=requested_title,
+                exists=bool(page["exists"]),
+                page_id=page["page_id"] if page["exists"] else None,
+                is_redirect=is_redirect,
+                redirect_target=redirect_target,
+                resolved_title=(page["title"] or resolved_title) if page["exists"] else resolved_title,
+                content=page["content"] if page["exists"] else None,
+            )
+
+    return results
 
 
 def check_page_exists(title: str) -> Tuple[bool, Optional[int]]:

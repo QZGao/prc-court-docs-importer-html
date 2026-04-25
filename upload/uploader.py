@@ -16,9 +16,13 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, 
 from rich.console import Console
 
 from .mediawiki import (
+    DEFAULT_READ_BATCH_SIZE,
+    PageSnapshot,
     check_page_exists,
+    fetch_page_content_batch,
     get_page_content,
     resolve_page,
+    resolve_pages_batch,
     save_page,
 )
 from .conflict_resolution import (
@@ -34,6 +38,7 @@ from .page_metadata import (
 )
 
 console = Console()
+DEFAULT_UPLOAD_QUERY_BATCH_SIZE = DEFAULT_READ_BATCH_SIZE
 
 
 def utc_now_iso() -> str:
@@ -80,7 +85,11 @@ def _same_case_document(existing_content: str, draft_content: str) -> bool:
     return bool(existing_case_title and existing_case_title == draft_case_title)
 
 
-def ensure_case_number_redirect(final_title: str, wikitext: str) -> Tuple[Optional[str], str]:
+def ensure_case_number_redirect(
+    final_title: str,
+    wikitext: str,
+    existing_case_page: Optional[object] = None,
+) -> Tuple[Optional[str], str]:
     """
     Ensure the case-number redirect exists for an uploaded document.
 
@@ -94,7 +103,7 @@ def ensure_case_number_redirect(final_title: str, wikitext: str) -> Tuple[Option
     if case_title == final_title:
         return case_title, "not_needed"
 
-    page_state = resolve_page(case_title)
+    page_state = existing_case_page if existing_case_page is not None else resolve_page(case_title)
     if not page_state.exists:
         save_page(
             case_title,
@@ -122,10 +131,19 @@ def ensure_case_number_redirect(final_title: str, wikitext: str) -> Tuple[Option
     return case_title, "occupied"
 
 
-def _attach_case_redirect(result: UploadResult, final_title: str, wikitext: str) -> UploadResult:
+def _attach_case_redirect(
+    result: UploadResult,
+    final_title: str,
+    wikitext: str,
+    existing_case_page: Optional[object] = None,
+) -> UploadResult:
     """Populate case-title metadata and create/update redirect when safe."""
     try:
-        case_title, redirect_status = ensure_case_number_redirect(final_title, wikitext)
+        case_title, redirect_status = ensure_case_number_redirect(
+            final_title,
+            wikitext,
+            existing_case_page=existing_case_page,
+        )
     except Exception as e:
         result.case_title = build_case_title_from_content(wikitext)
         result.redirect_status = "failed"
@@ -156,6 +174,8 @@ def upload_document(
     wikitext: str,
     resolve_conflicts: bool = True,
     force_overwrite: bool = False,
+    existing_page: Optional[PageSnapshot] = None,
+    case_page: Optional[object] = None,
 ) -> UploadResult:
     """
     Upload a single document to zhwikisource.
@@ -174,18 +194,19 @@ def upload_document(
     timestamp = utc_now_iso()
     case_title = build_case_title_from_content(wikitext)
 
-    try:
-        case_page = resolve_page(case_title) if case_title else None
-    except Exception as e:
-        return UploadResult(
-            title=title,
-            wenshu_id=wenshu_id,
-            status='failed',
-            final_title=title,
-            case_title=case_title,
-            message=f"Failed to resolve case-number title: {e}",
-            timestamp=timestamp,
-        )
+    if case_page is None:
+        try:
+            case_page = resolve_page(case_title) if case_title else None
+        except Exception as e:
+            return UploadResult(
+                title=title,
+                wenshu_id=wenshu_id,
+                status='failed',
+                final_title=title,
+                case_title=case_title,
+                message=f"Failed to resolve case-number title: {e}",
+                timestamp=timestamp,
+            )
 
     # Force-overwrite mode: skip existence check and write directly
     if force_overwrite:
@@ -198,7 +219,7 @@ def upload_document(
                 final_title=title,
                 message="Overwritten successfully",
                 timestamp=timestamp,
-            ), title, wikitext)
+            ), title, wikitext, existing_case_page=case_page)
         except Exception as e:
             return UploadResult(
                 title=title,
@@ -211,24 +232,30 @@ def upload_document(
             )
 
     # Check if page exists
-    try:
-        exists, _ = check_page_exists(title)
-    except Exception as e:
-        return UploadResult(
-            title=title,
-            wenshu_id=wenshu_id,
-            status='failed',
-            final_title=title,
-            case_title=case_title,
-            message=f"Failed to check page existence: {e}",
-            timestamp=timestamp,
-        )
+    if existing_page is None:
+        try:
+            exists, _ = check_page_exists(title)
+        except Exception as e:
+            return UploadResult(
+                title=title,
+                wenshu_id=wenshu_id,
+                status='failed',
+                final_title=title,
+                case_title=case_title,
+                message=f"Failed to check page existence: {e}",
+                timestamp=timestamp,
+            )
+        existing_content = None
+    else:
+        exists = existing_page.exists
+        existing_content = existing_page.content if existing_page.exists else None
     
     if exists:
         # Page exists - check if we should try conflict resolution
         if resolve_conflicts:
             try:
-                _, existing_content = get_page_content(title)
+                if existing_content is None:
+                    _, existing_content = get_page_content(title)
                 if existing_content:
                     # Check if content is identical
                     if wikitext.strip() == existing_content.strip():
@@ -239,7 +266,7 @@ def upload_document(
                             final_title=title,
                             message="Content identical to existing page",
                             timestamp=timestamp,
-                        ), title, wikitext)
+                        ), title, wikitext, existing_case_page=case_page)
 
                     if is_header_page(existing_content) and _same_case_document(existing_content, wikitext):
                         return _attach_case_redirect(UploadResult(
@@ -249,7 +276,7 @@ def upload_document(
                             final_title=title,
                             message="Case number already exists at the original title",
                             timestamp=timestamp,
-                        ), title, wikitext)
+                        ), title, wikitext, existing_case_page=case_page)
                     
                     # Check if conflict is resolvable
                     is_resolvable, scenario = is_conflict_resolvable(
@@ -270,7 +297,10 @@ def upload_document(
                             
                             # Check if new title already exists
                             try:
-                                new_page = resolve_page(new_title)
+                                if case_title and new_title == case_title and case_page is not None:
+                                    new_page = case_page
+                                else:
+                                    new_page = resolve_page(new_title)
                                 if new_page.exists:
                                     if _is_header_landing_page(new_page):
                                         return UploadResult(
@@ -321,7 +351,7 @@ def upload_document(
                                     final_title=new_title,
                                     message=f"Resolved: {scenario}",
                                     timestamp=timestamp,
-                                ), new_title, updated_wikitext)
+                                ), new_title, updated_wikitext, existing_case_page=case_page)
                             except Exception as e:
                                 return UploadResult(
                                     title=title,
@@ -433,7 +463,7 @@ def upload_document(
             final_title=title,
             message="Created successfully",
             timestamp=timestamp,
-        ), title, wikitext)
+        ), title, wikitext, existing_case_page=case_page)
     except Exception as e:
         # pywikibot handles maxlag automatically via config.maxlag
         return UploadResult(
@@ -445,6 +475,76 @@ def upload_document(
             message=f"Failed to save: {e}",
             timestamp=timestamp,
         )
+
+
+def _process_prefetched_upload_batch(
+    *,
+    batch_docs: list[dict],
+    uploaded_f,
+    failed_f,
+    skipped_f,
+    overwritable_f,
+    resolve_conflicts: bool,
+    force_overwrite: bool,
+) -> Tuple[int, int, int, int, int]:
+    """Process one upload chunk using batched read-side page queries."""
+    uploaded_count = 0
+    failed_count = 0
+    skipped_count = 0
+    resolved_count = 0
+    overwritable_count = 0
+
+    title_pages: dict[str, PageSnapshot] = {}
+    case_pages = {}
+
+    try:
+        title_pages = fetch_page_content_batch(
+            [doc["title"] for doc in batch_docs],
+            batch_size=DEFAULT_UPLOAD_QUERY_BATCH_SIZE,
+        )
+    except Exception as exc:
+        logging.warning("Falling back to per-title reads after batch title query failure: %s", exc)
+
+    case_titles = [doc["case_title"] for doc in batch_docs if doc.get("case_title")]
+    if case_titles:
+        try:
+            case_pages = resolve_pages_batch(
+                case_titles,
+                batch_size=DEFAULT_UPLOAD_QUERY_BATCH_SIZE,
+            )
+        except Exception as exc:
+            logging.warning("Falling back to per-title reads after batch case-title query failure: %s", exc)
+
+    for doc in batch_docs:
+        result = upload_document(
+            title=doc["title"],
+            wenshu_id=doc["wenshu_id"],
+            wikitext=doc["wikitext"],
+            resolve_conflicts=resolve_conflicts,
+            force_overwrite=force_overwrite,
+            existing_page=title_pages.get(doc["title"]),
+            case_page=case_pages.get(doc["case_title"]) if doc.get("case_title") else None,
+        )
+
+        result_dict = asdict(result)
+
+        if result.status == 'uploaded':
+            uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+            uploaded_count += 1
+        elif result.status == 'conflict_resolved':
+            uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+            resolved_count += 1
+        elif result.status == 'skipped':
+            skipped_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+            skipped_count += 1
+        elif result.status == 'overwritable':
+            overwritable_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+            overwritable_count += 1
+        else:
+            failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+            failed_count += 1
+
+    return uploaded_count, failed_count, skipped_count, resolved_count, overwritable_count
 
 
 def process_upload_batch(
@@ -510,7 +610,9 @@ def process_upload_batch(
                 "[cyan]Uploading: 0 ✓, 0 ✗, 0 ⊘",
                 total=file_size
             )
-            
+
+            batch_docs: list[dict] = []
+
             for line in infile:
                 # Track bytes read for progress
                 bytes_read += len(line.encode('utf-8'))
@@ -568,40 +670,54 @@ def process_upload_batch(
                     )
                     continue
                 
-                # Upload the document
-                result = upload_document(
-                    title=title,
-                    wenshu_id=wenshu_id,
-                    wikitext=wikitext,
+                batch_docs.append(
+                    {
+                        "line_num": doc_num,
+                        "title": title,
+                        "wenshu_id": wenshu_id,
+                        "wikitext": wikitext,
+                        "case_title": build_case_title_from_content(wikitext),
+                    }
+                )
+
+                if len(batch_docs) >= DEFAULT_UPLOAD_QUERY_BATCH_SIZE:
+                    batch_uploaded, batch_failed, batch_skipped, batch_resolved, batch_overwritable = _process_prefetched_upload_batch(
+                        batch_docs=batch_docs,
+                        uploaded_f=uploaded_f,
+                        failed_f=failed_f,
+                        skipped_f=skipped_f,
+                        overwritable_f=overwritable_f,
+                        resolve_conflicts=resolve_conflicts,
+                        force_overwrite=force_overwrite,
+                    )
+                    uploaded_count += batch_uploaded
+                    failed_count += batch_failed
+                    skipped_count += batch_skipped
+                    resolved_count += batch_resolved
+                    overwritable_count += batch_overwritable
+                    batch_docs = []
+
+                    progress.update(
+                        task,
+                        completed=bytes_read,
+                        description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count + overwritable_count} ⊘"
+                    )
+
+            if batch_docs:
+                batch_uploaded, batch_failed, batch_skipped, batch_resolved, batch_overwritable = _process_prefetched_upload_batch(
+                    batch_docs=batch_docs,
+                    uploaded_f=uploaded_f,
+                    failed_f=failed_f,
+                    skipped_f=skipped_f,
+                    overwritable_f=overwritable_f,
                     resolve_conflicts=resolve_conflicts,
                     force_overwrite=force_overwrite,
                 )
-                
-                # Log result
-                result_dict = asdict(result)
-                
-                if result.status == 'uploaded':
-                    uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                    uploaded_count += 1
-                elif result.status == 'conflict_resolved':
-                    uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                    resolved_count += 1
-                elif result.status == 'skipped':
-                    skipped_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                    skipped_count += 1
-                elif result.status == 'overwritable':
-                    overwritable_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                    overwritable_count += 1
-                else:  # failed
-                    failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-                    failed_count += 1
-                
-                # Update progress bar
-                progress.update(
-                    task, 
-                    completed=bytes_read,
-                    description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count + overwritable_count} ⊘"
-                )
+                uploaded_count += batch_uploaded
+                failed_count += batch_failed
+                skipped_count += batch_skipped
+                resolved_count += batch_resolved
+                overwritable_count += batch_overwritable
             
             # Final update with green color
             progress.update(

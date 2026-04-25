@@ -1,10 +1,11 @@
 """
-Tests for upload-time redirect creation and conflict resolution.
+Tests for upload-time redirect creation, batching, and conflict resolution.
 """
 
+import json
 from textwrap import dedent
 
-from upload.mediawiki import ResolvedPage
+from upload.mediawiki import PageSnapshot, ResolvedPage
 from upload import uploader
 from upload import conflict_resolution
 
@@ -84,7 +85,7 @@ def test_upload_document_creates_case_redirect_after_upload(monkeypatch):
     assert result.final_title == title
     assert result.case_title == case_title
     assert result.redirect_status == "created"
-    assert resolve_calls["count"] == 2
+    assert resolve_calls["count"] == 1
     assert saves[0][0] == title
     assert saves[1][0] == case_title
     assert "#REDIRECT [[张三与李四民事判决书]]" in saves[1][1]
@@ -188,7 +189,7 @@ def test_upload_document_skips_after_versions_resolution_when_case_page_exists(m
     assert result.final_title == "已有落点"
     assert result.case_title == case_title
     assert result.redirect_status == "existing"
-    assert resolve_calls["count"] == 2
+    assert resolve_calls["count"] == 1
 
 
 def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(monkeypatch):
@@ -254,3 +255,108 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
     assert "[[共享标题]]" in saves[1][1]
     assert saves[2][0] == original_title
     assert "{{versions" in saves[2][1]
+
+
+def test_process_upload_batch_prefetches_page_queries(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.jsonl"
+    uploaded_log = tmp_path / "uploaded.jsonl"
+    failed_log = tmp_path / "failed.jsonl"
+    skipped_log = tmp_path / "skipped.jsonl"
+    overwritable_log = tmp_path / "overwritable.jsonl"
+
+    first_title = "张三与李四民事判决书"
+    second_title = "王五与赵六民事判决书"
+    first_case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    second_case_title = "北京市第一中级人民法院（2024）京01民终2号民事判决书"
+    first_wikitext = make_header_page(
+        title=first_title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    second_wikitext = make_header_page(
+        title=second_title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终2号",
+    )
+
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"title": first_title, "wenshu_id": "doc-1", "wikitext": first_wikitext}, ensure_ascii=False),
+                json.dumps({"title": second_title, "wenshu_id": "doc-2", "wikitext": second_wikitext}, ensure_ascii=False),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    seen = {
+        "title_batches": [],
+        "case_batches": [],
+        "upload_calls": [],
+    }
+
+    monkeypatch.setattr(uploader, "DEFAULT_UPLOAD_QUERY_BATCH_SIZE", 2)
+
+    def fake_fetch_page_content_batch(titles, batch_size):
+        seen["title_batches"].append((list(titles), batch_size))
+        return {
+            title: PageSnapshot(
+                requested_title=title,
+                exists=False,
+                canonical_title=title,
+                content=None,
+            )
+            for title in titles
+        }
+
+    def fake_resolve_pages_batch(titles, batch_size):
+        seen["case_batches"].append((list(titles), batch_size))
+        return {
+            title: ResolvedPage(
+                requested_title=title,
+                exists=False,
+            )
+            for title in titles
+        }
+
+    def fake_upload_document(
+        *,
+        title,
+        wenshu_id,
+        wikitext,
+        resolve_conflicts,
+        force_overwrite,
+        existing_page,
+        case_page,
+    ):
+        seen["upload_calls"].append((title, wenshu_id, existing_page, case_page))
+        assert existing_page is not None
+        assert case_page is not None
+        return uploader.UploadResult(
+            title=title,
+            wenshu_id=wenshu_id,
+            status="uploaded",
+            final_title=title,
+            case_title=uploader.build_case_title_from_content(wikitext),
+            message="Created successfully",
+            timestamp=uploader.utc_now_iso(),
+        )
+
+    monkeypatch.setattr(uploader, "fetch_page_content_batch", fake_fetch_page_content_batch)
+    monkeypatch.setattr(uploader, "resolve_pages_batch", fake_resolve_pages_batch)
+    monkeypatch.setattr(uploader, "upload_document", fake_upload_document)
+
+    uploaded, failed, skipped, resolved, overwritable = uploader.process_upload_batch(
+        input_path=input_path,
+        uploaded_log=uploaded_log,
+        failed_log=failed_log,
+        skipped_log=skipped_log,
+        overwritable_log=overwritable_log,
+    )
+
+    assert (uploaded, failed, skipped, resolved, overwritable) == (2, 0, 0, 0, 0)
+    assert seen["title_batches"] == [([first_title, second_title], 2)]
+    assert seen["case_batches"] == [([first_case_title, second_case_title], 2)]
+    assert [call[0] for call in seen["upload_calls"]] == [first_title, second_title]
