@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory for output logs (default: same directory as input)",
     )
     parser.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="Number of non-empty JSONL rows to skip before processing (default: 0)",
+    )
+    parser.add_argument(
         "--max",
         type=int,
         default=None,
@@ -657,6 +663,7 @@ def process_record_batch(
 def process_input(
     input_path: Path,
     log_paths: dict[str, Path],
+    skip_rows: int,
     max_rows: int | None,
     dry_run: bool,
     batch_size: int,
@@ -666,6 +673,7 @@ def process_input(
     input_size = input_path.stat().st_size
 
     counts = {
+        "skipped_rows": 0,
         "processed": 0,
         "created": 0,
         "missing_page": 0,
@@ -718,6 +726,11 @@ def process_input(
                 stripped_line = raw_line.strip()
 
                 if not stripped_line:
+                    progress.update(task_id, completed=bytes_read)
+                    continue
+
+                if counts["skipped_rows"] < skip_rows:
+                    counts["skipped_rows"] += 1
                     progress.update(task_id, completed=bytes_read)
                     continue
 
@@ -844,6 +857,8 @@ def process_input(
 def main() -> int:
     args = parse_args()
 
+    if args.skip < 0:
+        raise ValueError("--skip must be 0 or greater")
     if args.max is not None and args.max <= 0:
         raise ValueError("--max must be greater than 0")
     if args.batch_size <= 0:
@@ -867,6 +882,7 @@ def main() -> int:
     console.print("=" * 72)
     console.print(f"Input:              {input_path}")
     console.print(f"Log directory:      {log_dir}")
+    console.print(f"Skip rows:          {args.skip or 'none'}")
     console.print(f"Max rows:           {args.max or 'all'}")
     console.print(f"Edit interval:      {args.interval}s")
     console.print(f"Maxlag:             {args.maxlag}")
@@ -889,6 +905,7 @@ def main() -> int:
         counts = process_input(
             input_path=input_path,
             log_paths=log_paths,
+            skip_rows=args.skip,
             max_rows=args.max,
             dry_run=args.dry_run,
             batch_size=args.batch_size,
