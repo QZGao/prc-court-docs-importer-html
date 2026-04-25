@@ -8,6 +8,7 @@ from textwrap import dedent
 from upload.mediawiki import PageSnapshot, ResolvedPage
 from upload import uploader
 from upload import conflict_resolution
+from upload.page_metadata import extract_redirect_target
 
 
 def make_header_page(
@@ -371,3 +372,110 @@ def test_process_upload_batch_prefetches_page_queries(tmp_path, monkeypatch):
     assert seen["title_batches"] == [([first_title, second_title], 2)]
     assert seen["case_batches"] == [([first_case_title, second_case_title], 2)]
     assert [call[0] for call in seen["upload_calls"]] == [first_title, second_title]
+
+
+def test_process_upload_batch_invalidates_stale_prefetch_after_write(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.jsonl"
+    uploaded_log = tmp_path / "uploaded.jsonl"
+    failed_log = tmp_path / "failed.jsonl"
+    skipped_log = tmp_path / "skipped.jsonl"
+    overwritable_log = tmp_path / "overwritable.jsonl"
+
+    title = "张三与李四民事判决书"
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"title": title, "wenshu_id": "doc-1", "wikitext": wikitext}, ensure_ascii=False),
+                json.dumps({"title": title, "wenshu_id": "doc-2", "wikitext": wikitext}, ensure_ascii=False),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    wiki_pages: dict[str, str] = {}
+    save_calls: list[str] = []
+
+    monkeypatch.setattr(uploader, "DEFAULT_UPLOAD_QUERY_BATCH_SIZE", 2)
+
+    def fake_fetch_page_content_batch(titles, batch_size):
+        return {
+            requested_title: PageSnapshot(
+                requested_title=requested_title,
+                exists=False,
+                canonical_title=requested_title,
+                content=None,
+            )
+            for requested_title in titles
+        }
+
+    def fake_resolve_pages_batch(titles, batch_size):
+        return {
+            requested_title: ResolvedPage(
+                requested_title=requested_title,
+                exists=False,
+            )
+            for requested_title in titles
+        }
+
+    def fake_check_page_exists(requested_title):
+        return (requested_title in wiki_pages, 1 if requested_title in wiki_pages else None)
+
+    def fake_get_page_content(requested_title):
+        if requested_title in wiki_pages:
+            return True, wiki_pages[requested_title]
+        return False, None
+
+    def fake_resolve_page(requested_title):
+        if requested_title not in wiki_pages:
+            return ResolvedPage(requested_title=requested_title, exists=False)
+
+        content = wiki_pages[requested_title]
+        redirect_target = extract_redirect_target(content)
+        if redirect_target:
+            return ResolvedPage(
+                requested_title=requested_title,
+                exists=True,
+                is_redirect=True,
+                redirect_target=redirect_target,
+                resolved_title=redirect_target,
+                content=wiki_pages.get(redirect_target),
+            )
+
+        return ResolvedPage(
+            requested_title=requested_title,
+            exists=True,
+            resolved_title=requested_title,
+            content=content,
+        )
+
+    def fake_save_page(target_title, content, summary, **kwargs):
+        save_calls.append(target_title)
+        wiki_pages[target_title] = content
+        return True
+
+    monkeypatch.setattr(uploader, "fetch_page_content_batch", fake_fetch_page_content_batch)
+    monkeypatch.setattr(uploader, "resolve_pages_batch", fake_resolve_pages_batch)
+    monkeypatch.setattr(uploader, "check_page_exists", fake_check_page_exists)
+    monkeypatch.setattr(uploader, "get_page_content", fake_get_page_content)
+    monkeypatch.setattr(uploader, "resolve_page", fake_resolve_page)
+    monkeypatch.setattr(uploader, "save_page", fake_save_page)
+
+    uploaded, failed, skipped, resolved, overwritable = uploader.process_upload_batch(
+        input_path=input_path,
+        uploaded_log=uploaded_log,
+        failed_log=failed_log,
+        skipped_log=skipped_log,
+        overwritable_log=overwritable_log,
+    )
+
+    assert (uploaded, failed, skipped, resolved, overwritable) == (1, 0, 1, 0, 0)
+    assert save_calls.count(title) == 1
+    assert save_calls.count(case_title) == 1

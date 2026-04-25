@@ -496,6 +496,7 @@ def _process_prefetched_upload_batch(
 
     title_pages: dict[str, PageSnapshot] = {}
     case_pages = {}
+    mutated_titles: set[str] = set()
 
     try:
         title_pages = fetch_page_content_batch(
@@ -516,14 +517,19 @@ def _process_prefetched_upload_batch(
             logging.warning("Falling back to per-title reads after batch case-title query failure: %s", exc)
 
     for doc in batch_docs:
+        existing_page = None if doc["title"] in mutated_titles else title_pages.get(doc["title"])
+        case_page = None
+        if doc.get("case_title"):
+            case_page = None if doc["case_title"] in mutated_titles else case_pages.get(doc["case_title"])
+
         result = upload_document(
             title=doc["title"],
             wenshu_id=doc["wenshu_id"],
             wikitext=doc["wikitext"],
             resolve_conflicts=resolve_conflicts,
             force_overwrite=force_overwrite,
-            existing_page=title_pages.get(doc["title"]),
-            case_page=case_pages.get(doc["case_title"]) if doc.get("case_title") else None,
+            existing_page=existing_page,
+            case_page=case_page,
         )
 
         result_dict = asdict(result)
@@ -543,6 +549,15 @@ def _process_prefetched_upload_batch(
         else:
             failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
             failed_count += 1
+
+        if result.status in {'uploaded', 'conflict_resolved'} or result.redirect_status in {'created', 'updated'}:
+            for touched_title in (
+                doc["title"],
+                result.final_title,
+                result.case_title,
+            ):
+                if touched_title:
+                    mutated_titles.add(touched_title)
 
     return uploaded_count, failed_count, skipped_count, resolved_count, overwritable_count
 
