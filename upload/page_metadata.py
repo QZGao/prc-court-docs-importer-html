@@ -140,3 +140,16 @@ def build_case_redirect_text(source_title: str) -> str:
 def build_case_redirect_summary(source_title: str) -> str:
     """Build the edit summary for case-number redirects."""
     return f"按案号创建重定向至[[{source_title}]]"
+
+
+def normalize_wikitext_for_comparison(page_text: Optional[str]) -> str:
+    """Normalize insignificant line-ending and trailing-newline differences."""
+    if not page_text:
+        return ""
+
+    return page_text.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+
+
+def wikitexts_match(left: Optional[str], right: Optional[str]) -> bool:
+    """Return whether two page texts are equivalent for upload-side comparisons."""
+    return normalize_wikitext_for_comparison(left) == normalize_wikitext_for_comparison(right)

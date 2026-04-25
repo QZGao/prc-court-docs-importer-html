@@ -35,6 +35,7 @@ from .page_metadata import (
     build_case_redirect_text,
     build_case_title_from_content,
     is_header_page,
+    wikitexts_match,
 )
 
 console = Console()
@@ -258,7 +259,7 @@ def upload_document(
                     _, existing_content = get_page_content(title)
                 if existing_content:
                     # Check if content is identical
-                    if wikitext.strip() == existing_content.strip():
+                    if wikitexts_match(wikitext, existing_content):
                         return _attach_case_redirect(UploadResult(
                             title=title,
                             wenshu_id=wenshu_id,

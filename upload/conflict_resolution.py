@@ -24,6 +24,7 @@ from .page_metadata import (
     is_versions_page,
     parse_header_metadata,
     parse_versions_metadata,
+    wikitexts_match,
 )
 
 
@@ -150,6 +151,13 @@ def add_entry_to_versions_page(content: str, new_entry_title: str) -> str:
     sorted_entries = sorted(set(all_entries))
 
     if entry_line_indices:
+        if (
+            new_entry_title in existing_entries
+            and len(existing_entries) == len(set(existing_entries))
+            and existing_entries == sorted_entries
+        ):
+            return content
+
         # Remove old entry lines (in reverse order)
         for idx in reversed(entry_line_indices):
             del lines[idx]
@@ -272,6 +280,12 @@ def _resolve_versions_page_conflict(
 
     # Update versions page with new entry
     updated_versions = add_entry_to_versions_page(existing_content, new_draft_title)
+    if wikitexts_match(updated_versions, existing_content):
+        log(
+            f"Versions page [[{original_title}]] already contains [[{new_draft_title}]]",
+            True,
+        )
+        return True, new_draft_title, None
 
     try:
         save_page(
@@ -383,7 +397,7 @@ def _resolve_header_page_conflict(
             )
 
         updated_existing = add_title_link_to_content(moved_content, original_title)
-        if updated_existing != moved_content:
+        if not wikitexts_match(updated_existing, moved_content):
             save_page(
                 new_existing_title,
                 updated_existing,
