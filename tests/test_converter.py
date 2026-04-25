@@ -70,9 +70,9 @@ class TestCleanText:
 class TestRedactionNormalization:
     """Tests for repeated redaction marker normalization."""
 
-    def test_two_markers_use_default_template(self):
-        assert normalize_redaction_markers("张三xx李四") == "张三{{PRC-redact}}李四"
-        assert normalize_redaction_markers("张三**李四") == "张三{{PRC-redact}}李四"
+    def test_two_markers_preserve_run_length(self):
+        assert normalize_redaction_markers("张三xx李四") == "张三{{PRC-redact|2}}李四"
+        assert normalize_redaction_markers("张三**李四") == "张三{{PRC-redact|2}}李四"
 
     def test_three_or_more_markers_preserve_run_length(self):
         assert normalize_redaction_markers("张三xxx李四") == "张三{{PRC-redact|3}}李四"
@@ -412,7 +412,7 @@ class TestWikitextRendering:
         assert result.title == "关于张三×××执行裁定书"
         assert "申请执行人张三{{PRC-redact|3}}。" in result.wikitext
         assert "|title = 关于张三×××执行裁定书" in result.wikitext
-        assert "|案号 = （2024）京01执{{PRC-redact}}号" in result.wikitext
+        assert "|案号 = （2024）京01执{{PRC-redact|2}}号" in result.wikitext
 
     def test_convert_document_normalizes_halfwidth_case_number_parentheses(self):
         raw_json = {

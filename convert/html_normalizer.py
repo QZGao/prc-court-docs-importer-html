@@ -100,16 +100,14 @@ def normalize_redaction_markers(text: str) -> str:
     Replace repeated redaction markers with {{PRC-redact}} templates.
 
     Adjacent runs of two or more characters from ×, X, x, etc are
-    collapsed into a single template. Two markers use the default template,
-    while longer runs keep the run length as the first parameter.
+    collapsed into a single template, always preserving the run length as
+    the first parameter.
     """
     if not text:
         return text
 
     def replacer(match: re.Match) -> str:
         length = len(match.group(0))
-        if length == 2:
-            return "{{PRC-redact}}"
         return f"{{{{PRC-redact|{length}}}}}"
 
     return REDACTION_SEQUENCE_PATTERN.sub(replacer, text)
