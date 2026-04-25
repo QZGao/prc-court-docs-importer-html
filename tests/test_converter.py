@@ -359,6 +359,19 @@ class TestWikitextRendering:
         assert "|court = 江西省南昌市人民法院" in wikitext
         assert "|type = 执行裁定书" in wikitext
         assert "|案号 = （2024）赣01执123号" in wikitext
+
+    def test_header_template_normalizes_halfwidth_case_number_parentheses(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>江西省南昌市人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+        <div style='TEXT-ALIGN: right;'>(2024)赣01执123号</div>
+        <div style='TEXT-INDENT: 30pt;'>正文内容。</div>
+        <div style='TEXT-ALIGN: right;'>审判员　张三</div>
+        <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
+        """
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "|案号 = （2024）赣01执123号" in wikitext
     
     def test_signature_template_format(self):
         """Test that {{裁判文书署名}} template is used for signatures."""
@@ -400,6 +413,30 @@ class TestWikitextRendering:
         assert "申请执行人张三{{PRC-redact|3}}。" in result.wikitext
         assert "|title = 关于张三×××执行裁定书" in result.wikitext
         assert "|案号 = （2024）京01执{{PRC-redact}}号" in result.wikitext
+
+    def test_convert_document_normalizes_halfwidth_case_number_parentheses(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-2",
+            "s2": "北京市第一中级人民法院",
+            "s7": "(2024)京01执123号",
+            "s22": "北京市第一中级人民法院\n执行裁定书\n(2024)京01执123号",
+            "qwContent": """
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市第一中级人民法院</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+                <div style='TEXT-ALIGN: right;'>(2024)京01执123号</div>
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.doc_id == "（2024）京01执123号"
+        assert "|案号 = （2024）京01执123号" in result.wikitext
 
 
 class TestTestCasesConversion:

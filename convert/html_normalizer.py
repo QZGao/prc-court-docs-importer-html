@@ -129,6 +129,18 @@ def normalize_title_redaction_markers(text: str) -> str:
     return REDACTION_SEQUENCE_PATTERN.sub(lambda match: '×' * len(match.group(0)), text)
 
 
+def normalize_case_number_parentheses(text: str) -> str:
+    """
+    Normalize half-width parentheses in case numbers to full-width Chinese ones.
+
+    This only rewrites ASCII parentheses and leaves other characters unchanged.
+    """
+    if not text:
+        return text
+
+    return text.replace('(', '（').replace(')', '）')
+
+
 class BlockType(Enum):
     """Types of content blocks in a court document."""
     TITLE = auto()        # Court name - centered, larger font
@@ -488,7 +500,7 @@ def normalize_html(html_content: str) -> ParsedDocument:
                 doc.doc_type = block.text.replace(" ", "")
             elif block.block_type == BlockType.DOC_ID:
                 # Doc ID: no spaces should exist at all
-                doc.doc_id = block.text.replace(" ", "")
+                doc.doc_id = normalize_case_number_parentheses(block.text.replace(" ", ""))
                 in_header = False
                 in_body = True
                 body_start_idx = i + 1
