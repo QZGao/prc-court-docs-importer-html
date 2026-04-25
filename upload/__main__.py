@@ -61,6 +61,13 @@ def main():
     )
     
     parser.add_argument(
+        "--skip", "-s",
+        type=int,
+        default=0,
+        help="Skip the first N lines in the source JSONL (default: 0)"
+    )
+
+    parser.add_argument(
         "--no-resolve",
         action="store_true",
         help="Disable conflict resolution (skip all conflicts)"
@@ -102,6 +109,7 @@ def main():
     console.print(f"Input:          {args.input}")
     console.print(f"Edit interval:  {args.interval}s (pywikibot put_throttle)")
     console.print(f"Maxlag:         {args.maxlag}")
+    console.print(f"Skip lines:     {args.skip}")
     console.print(f"Max documents:  {args.max or 'all'}")
     console.print(f"Resolve:        {not args.no_resolve}")
     console.print(f"Overwrite:      {args.overwrite}")
@@ -130,6 +138,7 @@ def main():
             resolve_conflicts=not args.no_resolve,
             force_overwrite=args.overwrite,
             max_documents=args.max,
+            skip_lines=args.skip,
         )
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Upload interrupted by user[/yellow]")

@@ -572,13 +572,14 @@ def process_upload_batch(
     resolve_conflicts: bool = True,
     force_overwrite: bool = False,
     max_documents: Optional[int] = None,
+    skip_lines: int = 0,
 ) -> Tuple[int, int, int, int, int]:
     """
     Process a batch of documents for upload.
-    
+
     Rate limiting is handled by pywikibot's built-in throttle.
     Configure via mediawiki.configure_throttle() before calling.
-    
+
     Args:
         input_path: Path to converted JSONL file
         uploaded_log: Path to log successfully uploaded pages
@@ -587,7 +588,8 @@ def process_upload_batch(
         overwritable_log: Path to log pages that could be overwritten (JSONL with wikitext)
         resolve_conflicts: Whether to attempt conflict resolution
         max_documents: Maximum number of documents to process (None = all)
-        
+        skip_lines: Number of leading source lines to skip before processing
+
     Returns:
         Tuple of (uploaded_count, failed_count, skipped_count, resolved_count, overwritable_count)
     """
@@ -597,21 +599,21 @@ def process_upload_batch(
     resolved_count = 0
     overwritable_count = 0
     doc_num = 0
-    
+
     # Get file size for progress bar
     file_size = input_path.stat().st_size
     bytes_read = 0
-    
+
     # Suppress pywikibot's verbose output during upload
     logging.getLogger('pywiki').setLevel(logging.WARNING)
     logging.getLogger('pywikibot').setLevel(logging.WARNING)
-    
+
     with open(input_path, 'r', encoding='utf-8') as infile, \
          open(uploaded_log, 'a', encoding='utf-8') as uploaded_f, \
          open(failed_log, 'a', encoding='utf-8') as failed_f, \
          open(skipped_log, 'a', encoding='utf-8') as skipped_f, \
          open(overwritable_log, 'a', encoding='utf-8') as overwritable_f:
-        
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -628,18 +630,25 @@ def process_upload_batch(
             )
 
             batch_docs: list[dict] = []
+            lines_skipped = 0
 
             for line in infile:
                 # Track bytes read for progress
                 bytes_read += len(line.encode('utf-8'))
-                
+
+                # Skip leading lines before processing
+                if lines_skipped < skip_lines:
+                    lines_skipped += 1
+                    progress.update(task, completed=bytes_read)
+                    continue
+
                 line = line.strip()
                 if not line:
                     progress.update(task, completed=bytes_read)
                     continue
-                
+
                 doc_num += 1
-                
+
                 # Check max documents limit
                 if max_documents and doc_num > max_documents:
                     break
