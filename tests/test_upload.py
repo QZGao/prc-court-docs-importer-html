@@ -211,6 +211,7 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
     )
     pages = {}
     saves = []
+    moves = []
 
     def fake_resolve_page(requested_title):
         assert requested_title == existing_case_title
@@ -228,12 +229,14 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
         saves.append((target_title, content, summary))
         return True
 
+    def fake_move_page(from_title, to_title, reason="", leave_redirect=True, ignore_warnings=False):
+        moves.append((from_title, to_title, reason, leave_redirect, ignore_warnings))
+        pages[to_title] = existing_content
+        return True
+
     monkeypatch.setattr(conflict_resolution, "resolve_page", fake_resolve_page)
-    monkeypatch.setattr(
-        conflict_resolution,
-        "move_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("move_page should not be called")),
-    )
+    monkeypatch.setattr(conflict_resolution, "can_move_over_redirect", lambda from_title, to_title: True)
+    monkeypatch.setattr(conflict_resolution, "move_page", fake_move_page)
     monkeypatch.setattr(conflict_resolution, "save_page", fake_save_page)
     monkeypatch.setattr(
         conflict_resolution,
@@ -250,11 +253,19 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
     assert resolved is True
     assert error is None
     assert new_title == draft_case_title
+    assert moves == [
+        (
+            original_title,
+            existing_case_title,
+            f"移动至具体案号页面，原标题改为版本页：[[{original_title}]]",
+            True,
+            True,
+        )
+    ]
     assert saves[0][0] == existing_case_title
-    assert saves[1][0] == existing_case_title
-    assert "[[共享标题]]" in saves[1][1]
-    assert saves[2][0] == original_title
-    assert "{{versions" in saves[2][1]
+    assert "[[共享标题]]" in saves[0][1]
+    assert saves[1][0] == original_title
+    assert "{{versions" in saves[1][1]
 
 
 def test_process_upload_batch_prefetches_page_queries(tmp_path, monkeypatch):

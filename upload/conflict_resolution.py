@@ -10,7 +10,13 @@ Handles two scenarios:
 import re
 from typing import Optional, Tuple, Callable, List
 
-from .mediawiki import get_page_content, save_page, move_page, resolve_page
+from .mediawiki import (
+    can_move_over_redirect,
+    get_page_content,
+    move_page,
+    resolve_page,
+    save_page,
+)
 from .page_metadata import (
     build_case_title_from_content,
     build_case_title_from_metadata,
@@ -331,15 +337,28 @@ def _resolve_header_page_conflict(
             )
             log(f"Moved [[{original_title}]] → [[{new_existing_title}]]", True)
         elif target_state.is_redirect:
-            save_page(
-                new_existing_title,
-                existing_content,
-                summary=f"以具体案号页面替换重定向：[[{original_title}]]",
-            )
-            log(
-                f"Replaced redirect [[{new_existing_title}]] with existing document content",
-                True,
-            )
+            if can_move_over_redirect(original_title, new_existing_title):
+                move_page(
+                    original_title,
+                    new_existing_title,
+                    reason=f"移动至具体案号页面，原标题改为版本页：[[{original_title}]]",
+                    leave_redirect=True,
+                    ignore_warnings=True,
+                )
+                log(
+                    f"Moved [[{original_title}]] → [[{new_existing_title}]] over overwriteable redirect",
+                    True,
+                )
+            else:
+                save_page(
+                    new_existing_title,
+                    existing_content,
+                    summary=f"以具体案号页面替换重定向：[[{original_title}]]",
+                )
+                log(
+                    f"Replaced redirect [[{new_existing_title}]] with existing document content",
+                    True,
+                )
         elif target_state.content and is_header_page(target_state.content):
             existing_target_title = build_case_title_from_content(target_state.content)
             if existing_target_title != new_existing_title:

@@ -94,6 +94,16 @@ class ResolvedPage:
     content: Optional[str] = None
 
 
+@dataclass
+class RedirectInfo:
+    """Redirect metadata for move-over-redirect decisions."""
+    title: str
+    exists: bool
+    is_redirect: bool
+    target_title: Optional[str] = None
+    revision_count: int = 0
+
+
 def _ensure_credentials() -> Tuple[str, str]:
     """
     Ensure bot credentials are available from environment variables.
@@ -453,6 +463,61 @@ def resolve_page(title: str, max_redirects: int = 10) -> ResolvedPage:
     raise ValueError(f"Too many redirects while resolving [[{title}]]")
 
 
+def get_redirect_info(title: str) -> RedirectInfo:
+    """
+    Inspect whether a title is a redirect and gather minimal history metadata.
+
+    Returns redirect target title and up to the first two revisions so callers
+    can identify the safe "single-revision redirect back to source" move case.
+    """
+    site = get_site()
+    page = Page(site, title)
+
+    if not page.exists():
+        return RedirectInfo(
+            title=title,
+            exists=False,
+            is_redirect=False,
+        )
+
+    if not page.isRedirectPage():
+        return RedirectInfo(
+            title=page.title(),
+            exists=True,
+            is_redirect=False,
+        )
+
+    target = page.getRedirectTarget().title(with_section=False)
+    revision_count = sum(1 for _ in page.revisions(total=2))
+
+    return RedirectInfo(
+        title=page.title(),
+        exists=True,
+        is_redirect=True,
+        target_title=target,
+        revision_count=revision_count,
+    )
+
+
+def can_move_over_redirect(from_title: str, to_title: str) -> bool:
+    """
+    Return whether MediaWiki should allow moving over the destination redirect.
+
+    This follows the documented safe case: the destination exists as a redirect
+    with a single history entry and points back to the source title.
+    """
+    site = get_site()
+    source_title = Page(site, from_title).title(with_section=False)
+    redirect_info = get_redirect_info(to_title)
+
+    return bool(
+        redirect_info.exists
+        and redirect_info.is_redirect
+        and redirect_info.target_title == source_title
+        and redirect_info.revision_count == 1
+    )
+
+
 def save_page(
     title: str,
     content: str,
@@ -499,6 +564,7 @@ def move_page(
     to_title: str,
     reason: str = "",
     leave_redirect: bool = True,
+    ignore_warnings: bool = False,
 ) -> bool:
     """
     Move (rename) a wiki page.
@@ -508,13 +574,31 @@ def move_page(
         to_title: The new page title
         reason: Move reason/summary
         leave_redirect: Whether to leave a redirect at old title
+        ignore_warnings: Whether to submit the move with ignorewarnings=1
         
     Returns:
         True if move was successful
     """
     site = get_site()
     page = Page(site, from_title)
-    
+
+    if ignore_warnings:
+        request = site.simple_request(
+            action='move',
+            to=to_title,
+            reason=reason,
+            movetalk=True,
+            movesubpages=True,
+            noredirect=not leave_redirect,
+            ignorewarnings=True,
+            token=site.tokens['csrf'],
+        )
+        request['from'] = page.title(with_section=False)
+        result = request.submit()
+        if 'move' not in result:
+            raise ValueError(f"Unexpected move response: {result}")
+        return True
+
     page.move(
         newtitle=to_title,
         reason=reason,
