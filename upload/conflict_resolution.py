@@ -125,8 +125,8 @@ def build_versions_page_content(
 }}}}
 {entries}
 
-[[Category:{year}年{header_type}]]
-[[Category:{header_type}]]
+[[Category:{year}年中华人民共和国{header_type}]]
+[[Category:中华人民共和国{header_type}]]
 [[Category:{noauthor}]]
 """
     return content
