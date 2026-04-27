@@ -31,6 +31,7 @@ Changes to the same page are batched into one save call per page.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import logging
@@ -151,6 +152,50 @@ def update_header_title_field(page_text: str, new_title: str) -> str:
     return re.sub(r'\|title\s*=\s*(.+)', replacer, page_text, count=1)
 
 
+def print_dry_run_diff(
+    index: int,
+    old_title: str,
+    new_title: str,
+    pending_moves: list[tuple[str, str, str]],
+    pending_edits: dict[str, tuple[str, str]],
+    pending_before: dict[str, str],
+) -> None:
+    console.rule(f"[bold]Entry {index}[/bold]  {old_title}  →  {new_title}", style="cyan")
+
+    for old_t, new_t, reason in pending_moves:
+        console.print(f"  [yellow bold]MOVE[/yellow bold]  [[{old_t}]]  →  [[{new_t}]]")
+        console.print(f"         {reason}")
+
+    for page_title, (new_text, summary) in pending_edits.items():
+        before = pending_before.get(page_title, "")
+        console.print(f"\n  [cyan bold]EDIT[/cyan bold]  [[{page_title}]]  —  {summary}")
+
+        diff_lines = list(difflib.unified_diff(
+            before.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"before",
+            tofile=f"after",
+            n=2,
+        ))
+
+        if not diff_lines:
+            console.print("         [dim](text unchanged)[/dim]")
+            continue
+
+        for line in diff_lines:
+            stripped = line.rstrip("\n")
+            if line.startswith("+++") or line.startswith("---"):
+                console.print(f"[dim]{stripped}[/dim]")
+            elif line.startswith("+"):
+                console.print(f"[green]{stripped}[/green]")
+            elif line.startswith("-"):
+                console.print(f"[red]{stripped}[/red]")
+            elif line.startswith("@@"):
+                console.print(f"[cyan]{stripped}[/cyan]")
+            else:
+                console.print(f"[dim]{stripped}[/dim]")
+
+
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(record, ensure_ascii=False))
@@ -215,6 +260,8 @@ def process_pair(
 
     # pending_edits: page_title → (new_text, summary)
     pending_edits: dict[str, tuple[str, str]] = {}
+    # pending_before: page_title → original text (for dry-run diff display)
+    pending_before: dict[str, str] = {}
     # pending_moves: list of (old_t, new_t, summary) — executed before edits
     pending_moves: list[tuple[str, str, str]] = []
 
@@ -239,6 +286,7 @@ def process_pair(
                         f"标题更新：[[{old_title}]] → [[{new_title}]]",
                     ))
                     new_redirect_text = update_redirect_target(redirect_page.text, new_title)
+                    pending_before[redirect_title] = redirect_page.text
                     pending_edits[redirect_title] = (
                         new_redirect_text,
                         f"更新重定向目标至[[{new_title}]]",
@@ -279,6 +327,7 @@ def process_pair(
                 elif old_title_page.isRedirectPage():
                     # 1.2.2 — T_old is a redirect; update case-number page header
                     new_case_text = update_header_title_field(redirect_page.text, new_title)
+                    pending_before[redirect_title] = redirect_page.text
                     pending_edits[redirect_title] = (
                         new_case_text,
                         f"更新标题引用至{new_title}",
@@ -302,11 +351,13 @@ def process_pair(
                     new_versions_text = update_header_title_field(
                         old_title_page.text, new_title
                     )
+                    pending_before[new_title] = old_title_page.text
                     pending_edits[new_title] = (
                         new_versions_text,
                         f"更新标题至{new_title}",
                     )
                     new_case_text = update_header_title_field(redirect_page.text, new_title)
+                    pending_before[redirect_title] = redirect_page.text
                     pending_edits[redirect_title] = (
                         new_case_text,
                         f"更新标题引用至{new_title}",
@@ -371,12 +422,13 @@ def process_pair(
                 if normalized_text != current_text:
                     existing = pending_edits.get(effective_landing_title)
                     if existing:
-                        # Re-normalize the already-pending text
+                        # Re-normalize the already-pending text; keep original as before
                         pending_edits[effective_landing_title] = (
                             normalize_redaction_markers(existing[0]),
                             existing[1] + "；规范化编辑标记",
                         )
                     else:
+                        pending_before[effective_landing_title] = current_text
                         pending_edits[effective_landing_title] = (
                             normalized_text,
                             "规范化编辑标记",
@@ -404,6 +456,14 @@ def process_pair(
     # ── Execute ───────────────────────────────────────────────────────────────
     if dry_run:
         counts["would_act"] += 1
+        print_dry_run_diff(
+            index=index,
+            old_title=old_title,
+            new_title=new_title,
+            pending_moves=pending_moves,
+            pending_edits=pending_edits,
+            pending_before=pending_before,
+        )
         return
 
     try:
@@ -448,9 +508,8 @@ def main() -> int:
     logging.getLogger("pywiki").setLevel(logging.WARNING)
     logging.getLogger("pywikibot").setLevel(logging.WARNING)
 
+    configure_throttle(interval=args.interval, maxlag=args.maxlag)
     site = get_site()
-    if not args.dry_run:
-        configure_throttle(interval=args.interval, maxlag=args.maxlag)
 
     console.print("=" * 72)
     console.print("[bold cyan]JSONL Diff Reconciler[/bold cyan]")
