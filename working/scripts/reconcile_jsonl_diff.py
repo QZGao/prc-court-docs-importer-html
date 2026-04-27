@@ -62,7 +62,7 @@ from rich.progress import (
 )
 
 from upload.mediawiki import configure_throttle, get_site
-from convert.html_normalizer import normalize_redaction_markers
+from convert.html_normalizer import normalize_redaction_markers, normalize_title_redaction_markers
 
 console = Console()
 
@@ -297,146 +297,158 @@ def process_pair(
     # Initialised from the redirect resolution below; may be overwritten.
     effective_landing_title: str | None = None
 
-    # ── Step 1: resolve title action ─────────────────────────────────────────
-    if title_differs:
-        try:
-            redirect_page = pywikibot.Page(site, redirect_title)
+    # ── Step 1: resolve landing page and title action ────────────────────────
+    # Always resolve the landing page — the wikitext step needs it too, and we
+    # want to catch raw redaction chars in the landing title independently of
+    # whether the two JSONLs report a title change.
+    try:
+        redirect_page = pywikibot.Page(site, redirect_title)
 
-            if redirect_page.exists() and redirect_page.isRedirectPage():
-                landing_page = redirect_page.getRedirectTarget()
-                landing_title = landing_page.title()
-                effective_landing_title = landing_title
+        if redirect_page.exists() and redirect_page.isRedirectPage():
+            landing_page = redirect_page.getRedirectTarget()
+            landing_title = landing_page.title()
+            effective_landing_title = landing_title  # refined below if renamed
 
-                if landing_title == old_title:
-                    # 1.1 — move old_title → new_title, update redirect
+            normalised_old     = normalize_title_redaction_markers(old_title)
+            normalised_landing = normalize_title_redaction_markers(landing_title)
+
+            # Trigger (a): JSONL says rename AND wiki page is at old title
+            #   (exact match or already-normalised form)
+            jsonl_rename = title_differs and landing_title in (old_title, normalised_old)
+
+            # Trigger (b): landing title itself carries raw redaction chars
+            landing_has_raw = normalised_landing != landing_title
+
+            if jsonl_rename:
+                desired_title = new_title
+            elif landing_has_raw:
+                desired_title = normalised_landing
+            else:
+                desired_title = None
+
+            if desired_title is not None:
+                if landing_title != desired_title:
                     pending_moves.append((
-                        old_title, new_title,
-                        f"标题更新：[[{old_title}]] → [[{new_title}]]",
+                        landing_title, desired_title,
+                        f"标题更新：[[{landing_title}]] → [[{desired_title}]]",
                     ))
-                    new_redirect_text = update_redirect_target(redirect_page.text, new_title)
+                new_redirect_text = update_redirect_target(redirect_page.text, desired_title)
+                if new_redirect_text != redirect_page.text:
                     pending_before[redirect_title] = redirect_page.text
                     pending_edits[redirect_title] = (
                         new_redirect_text,
-                        f"更新重定向目标至[[{new_title}]]",
+                        f"更新重定向目标至[[{desired_title}]]",
                     )
-                    effective_landing_title = new_title
-                    append_jsonl(log_paths["moved"], {
-                        "case": "1.1", "index": index,
-                        "old_title": old_title, "new_title": new_title,
-                        "redirect_title": redirect_title,
-                        "timestamp": utc_now_iso(),
-                    })
+                effective_landing_title = desired_title
+                append_jsonl(log_paths["moved"], {
+                    "case": "1.1", "index": index,
+                    "reason": "jsonl_rename" if jsonl_rename else "landing_normalise",
+                    "old_title": old_title, "landing_title": landing_title,
+                    "desired_title": desired_title, "redirect_title": redirect_title,
+                    "timestamp": utc_now_iso(),
+                })
 
-                else:
-                    append_jsonl(log_paths["skipped"], {
-                        "reason": "landing_title_unexpected",
-                        "index": index, "old_title": old_title, "new_title": new_title,
-                        "redirect_title": redirect_title, "landing_title": landing_title,
-                        "timestamp": utc_now_iso(),
-                    })
-                    counts["skipped"] += 1
-                    title_differs = False  # nothing we can do here
-
-            elif redirect_page.exists() and not redirect_page.isRedirectPage():
-                # 1.2 — case-number page IS the document landing page (disambiguation via
-                # case number because multiple documents share the same canonical title)
-                effective_landing_title = redirect_title
-                old_title_page = pywikibot.Page(site, old_title)
-
-                if not old_title_page.exists():
-                    append_jsonl(log_paths["skipped"], {
-                        "reason": "old_title_page_missing",
-                        "index": index, "old_title": old_title, "new_title": new_title,
-                        "redirect_title": redirect_title, "timestamp": utc_now_iso(),
-                    })
-                    counts["skipped"] += 1
-                    title_differs = False
-
-                elif old_title_page.isRedirectPage():
-                    # 1.2.2 — T_old is a redirect; update case-number page header
-                    new_case_text = update_header_title_field(redirect_page.text, new_title)
-                    pending_before[redirect_title] = redirect_page.text
-                    pending_edits[redirect_title] = (
-                        new_case_text,
-                        f"更新标题引用至{new_title}",
-                    )
-                    append_jsonl(log_paths["moved"], {
-                        "case": "1.2.2", "index": index,
-                        "old_title": old_title, "new_title": new_title,
-                        "redirect_title": redirect_title,
-                        "timestamp": utc_now_iso(),
-                    })
-
-                elif "{{Versions" in old_title_page.text:
-                    # 1.2.1 — T_old is a {{Versions page; move, then update both pages.
-                    # The document itself stays at redirect_title; only the disambiguation
-                    # page is being renamed. effective_landing_title stays as redirect_title.
-                    pending_moves.append((
-                        old_title, new_title,
-                        f"标题更新：[[{old_title}]] → [[{new_title}]]",
-                    ))
-                    # After the move the content at new_title will be old_title_page.text
-                    new_versions_text = update_header_title_field(
-                        old_title_page.text, new_title
-                    )
-                    pending_before[new_title] = old_title_page.text
-                    pending_edits[new_title] = (
-                        new_versions_text,
-                        f"更新标题至{new_title}",
-                    )
-                    new_case_text = update_header_title_field(redirect_page.text, new_title)
-                    pending_before[redirect_title] = redirect_page.text
-                    pending_edits[redirect_title] = (
-                        new_case_text,
-                        f"更新标题引用至{new_title}",
-                    )
-                    append_jsonl(log_paths["moved"], {
-                        "case": "1.2.1", "index": index,
-                        "old_title": old_title, "new_title": new_title,
-                        "redirect_title": redirect_title,
-                        "timestamp": utc_now_iso(),
-                    })
-
-                else:
-                    append_jsonl(log_paths["skipped"], {
-                        "reason": "old_title_page_not_versions_or_redirect",
-                        "index": index, "old_title": old_title, "new_title": new_title,
-                        "redirect_title": redirect_title, "timestamp": utc_now_iso(),
-                    })
-                    counts["skipped"] += 1
-                    title_differs = False
-
-            else:
+            elif title_differs:
                 append_jsonl(log_paths["skipped"], {
-                    "reason": "redirect_page_missing",
+                    "reason": "landing_title_unexpected",
+                    "index": index, "old_title": old_title, "new_title": new_title,
+                    "redirect_title": redirect_title, "landing_title": landing_title,
+                    "timestamp": utc_now_iso(),
+                })
+                counts["skipped"] += 1
+                title_differs = False
+
+        elif title_differs and redirect_page.exists() and not redirect_page.isRedirectPage():
+            # 1.2 — case-number page IS the document landing page (disambiguation via
+            # case number because multiple documents share the same canonical title)
+            effective_landing_title = redirect_title
+            old_title_page = pywikibot.Page(site, old_title)
+
+            if not old_title_page.exists():
+                append_jsonl(log_paths["skipped"], {
+                    "reason": "old_title_page_missing",
                     "index": index, "old_title": old_title, "new_title": new_title,
                     "redirect_title": redirect_title, "timestamp": utc_now_iso(),
                 })
                 counts["skipped"] += 1
                 title_differs = False
 
-        except Exception as exc:
-            counts["failed"] += 1
-            append_jsonl(log_paths["failed"], {
-                "step": "title", "index": index,
-                "old_title": old_title, "new_title": new_title,
-                "redirect_title": redirect_title,
-                "error": str(exc), "timestamp": utc_now_iso(),
+            elif old_title_page.isRedirectPage():
+                # 1.2.2 — T_old is a redirect; update case-number page header
+                new_case_text = update_header_title_field(redirect_page.text, new_title)
+                pending_before[redirect_title] = redirect_page.text
+                pending_edits[redirect_title] = (
+                    new_case_text,
+                    f"更新标题引用至{new_title}",
+                )
+                append_jsonl(log_paths["moved"], {
+                    "case": "1.2.2", "index": index,
+                    "old_title": old_title, "new_title": new_title,
+                    "redirect_title": redirect_title,
+                    "timestamp": utc_now_iso(),
+                })
+
+            elif "{{Versions" in old_title_page.text:
+                # 1.2.1 — T_old is a {{Versions page; move, then update both pages.
+                # The document itself stays at redirect_title; only the disambiguation
+                # page is being renamed. effective_landing_title stays as redirect_title.
+                pending_moves.append((
+                    old_title, new_title,
+                    f"标题更新：[[{old_title}]] → [[{new_title}]]",
+                ))
+                # After the move the content at new_title will be old_title_page.text
+                new_versions_text = update_header_title_field(
+                    old_title_page.text, new_title
+                )
+                pending_before[new_title] = old_title_page.text
+                pending_edits[new_title] = (
+                    new_versions_text,
+                    f"更新标题至{new_title}",
+                )
+                new_case_text = update_header_title_field(redirect_page.text, new_title)
+                pending_before[redirect_title] = redirect_page.text
+                pending_edits[redirect_title] = (
+                    new_case_text,
+                    f"更新标题引用至{new_title}",
+                )
+                append_jsonl(log_paths["moved"], {
+                    "case": "1.2.1", "index": index,
+                    "old_title": old_title, "new_title": new_title,
+                    "redirect_title": redirect_title,
+                    "timestamp": utc_now_iso(),
+                })
+
+            else:
+                append_jsonl(log_paths["skipped"], {
+                    "reason": "old_title_page_not_versions_or_redirect",
+                    "index": index, "old_title": old_title, "new_title": new_title,
+                    "redirect_title": redirect_title, "timestamp": utc_now_iso(),
+                })
+                counts["skipped"] += 1
+                title_differs = False
+
+        elif title_differs:
+            append_jsonl(log_paths["skipped"], {
+                "reason": "redirect_page_missing",
+                "index": index, "old_title": old_title, "new_title": new_title,
+                "redirect_title": redirect_title, "timestamp": utc_now_iso(),
             })
-            return
+            counts["skipped"] += 1
+            title_differs = False
+
+    except Exception as exc:
+        counts["failed"] += 1
+        append_jsonl(log_paths["failed"], {
+            "step": "title", "index": index,
+            "old_title": old_title, "new_title": new_title,
+            "redirect_title": redirect_title,
+            "error": str(exc), "timestamp": utc_now_iso(),
+        })
+        return
 
     # ── Step 2: resolve wikitext action ──────────────────────────────────────
     if wikitext_differs:
         try:
-            if effective_landing_title is None:
-                # title step was skipped — resolve landing page now
-                redirect_page = pywikibot.Page(site, redirect_title)
-                if redirect_page.exists():
-                    if redirect_page.isRedirectPage():
-                        effective_landing_title = redirect_page.getRedirectTarget().title()
-                    else:
-                        effective_landing_title = redirect_title
-
             if effective_landing_title is not None:
                 landing_page = pywikibot.Page(site, effective_landing_title)
 
