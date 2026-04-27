@@ -42,7 +42,7 @@ CJK_PATTERN = re.compile(
     r']'
 )
 
-REDACTION_SEQUENCE_PATTERN = re.compile(r'(?<![A-WYZa-wyz])[×XxＸｘ*＊∗✱﹡⁎٭※]+(?![A-WYZa-wyz])')
+REDACTION_SEQUENCE_PATTERN = re.compile(r'(?<![A-WYZa-wyz])[×XxＸｘ*＊∗✱﹡⁎٭※]+(?![A-WYZa-wyz\d.])')
 
 
 def remove_cjk_spaces(text: str) -> str:
