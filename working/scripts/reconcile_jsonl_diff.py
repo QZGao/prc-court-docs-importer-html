@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Reconcile title and wikitext differences between two JSONL snapshots on zhwikisource.
+Reconcile zhwikisource pages from JSONL diffs or a plain-text title list.
 
 For each entry where title or wikitext differs between --old-jsonl and --new-jsonl:
 
@@ -26,6 +26,9 @@ For each entry where title or wikitext differs between --old-jsonl and --new-jso
      run normalize_redaction_markers over it, and save if it changed.
 
 Changes to the same page are batched into one save call per page.
+
+When --lista is used instead of the JSONL pair, the script skips title
+resolution and directly runs step 2 on each listed page title.
 """
 
 from __future__ import annotations
@@ -67,23 +70,36 @@ from convert.html_normalizer import normalize_redaction_markers, normalize_title
 console = Console()
 
 REDIRECT_CATEGORY = "中华人民共和国法院裁判文书案号重定向"
+DEFAULT_LISTA = PROJECT_ROOT / "working" / "lista.txt"
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Reconcile zhwikisource pages from two JSONL snapshot diffs."
+        description="Reconcile zhwikisource pages from JSONL snapshot diffs or a title list."
     )
-    parser.add_argument("--old-jsonl", type=Path, required=True, metavar="PATH")
-    parser.add_argument("--new-jsonl", type=Path, required=True, metavar="PATH")
+    parser.add_argument("--old-jsonl", type=Path, metavar="PATH")
+    parser.add_argument("--new-jsonl", type=Path, metavar="PATH")
+    parser.add_argument(
+        "--lista",
+        type=Path,
+        nargs="?",
+        const=DEFAULT_LISTA,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Normalize page titles from a plain-text list instead of JSONL diffs "
+            f"(default path when provided without PATH: {DEFAULT_LISTA})"
+        ),
+    )
     parser.add_argument(
         "--max", type=int, default=55120,
-        help="Maximum entries to compare from each file (default: 55120)",
+        help="Maximum entries or titles to process (default: 55120)",
     )
     parser.add_argument(
         "--log-dir", type=Path, default=None,
-        help="Directory for output logs (default: same directory as --new-jsonl)",
+        help="Directory for output logs (default: same directory as input file)",
     )
     parser.add_argument(
         "--interval", type=float, default=10.0,
@@ -97,7 +113,20 @@ def parse_args() -> argparse.Namespace:
         "--dry-run", action="store_true",
         help="Plan actions without saving any changes",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+
+    using_jsonl = args.old_jsonl is not None or args.new_jsonl is not None
+
+    if args.lista is not None and using_jsonl:
+        parser.error("--lista cannot be used with --old-jsonl/--new-jsonl")
+
+    if args.lista is None and not (args.old_jsonl and args.new_jsonl):
+        parser.error("provide either --lista [PATH] or both --old-jsonl and --new-jsonl")
+
+    if args.lista is None and (args.old_jsonl is None or args.new_jsonl is None):
+        parser.error("--old-jsonl and --new-jsonl must be provided together")
+
+    return args
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -187,8 +216,11 @@ def print_dry_run_diff(
     pending_moves: list[tuple[str, str, str]],
     pending_edits: dict[str, tuple[str, str]],
     pending_before: dict[str, str],
+    heading: str | None = None,
 ) -> None:
-    console.rule(f"[bold]Entry {index}[/bold]  {old_title}  →  {new_title}", style="cyan")
+    if heading is None:
+        heading = f"{old_title}  →  {new_title}"
+    console.rule(f"[bold]Entry {index}[/bold]  {heading}", style="cyan")
 
     for old_t, new_t, reason in pending_moves:
         console.print(f"  [yellow bold]MOVE[/yellow bold]  [[{old_t}]]  →  [[{new_t}]]")
@@ -256,6 +288,19 @@ def read_jsonl_entries(path: Path, max_count: int) -> list[dict[str, Any]]:
             if len(entries) >= max_count:
                 break
     return entries
+
+
+def read_titles(path: Path, max_count: int) -> list[str]:
+    titles: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            title = line.strip()
+            if not title:
+                continue
+            titles.append(title)
+            if len(titles) >= max_count:
+                break
+    return titles
 
 
 # ── Per-record processing ─────────────────────────────────────────────────────
@@ -528,20 +573,112 @@ def process_pair(
         })
 
 
+def process_title(
+    *,
+    index: int,
+    title: str,
+    site: pywikibot.Site,
+    dry_run: bool,
+    counts: dict[str, int],
+    log_paths: dict[str, Path],
+) -> None:
+    pending_before: dict[str, str] = {}
+    pending_edits: dict[str, tuple[str, str]] = {}
+
+    try:
+        page = pywikibot.Page(site, title)
+        if not page.exists():
+            append_jsonl(log_paths["skipped"], {
+                "reason": "page_missing",
+                "index": index,
+                "page_title": title,
+                "timestamp": utc_now_iso(),
+            })
+            counts["skipped"] += 1
+            return
+
+        current_text = page.text
+        normalized_text = combine_adjacent_redactions(
+            normalize_redaction_markers(current_text)
+        )
+
+        if normalized_text == current_text:
+            counts["unchanged"] += 1
+            return
+
+        pending_before[title] = current_text
+        pending_edits[title] = (normalized_text, "规范化编辑标记")
+        append_jsonl(log_paths["normalized"], {
+            "index": index,
+            "page_title": title,
+            "timestamp": utc_now_iso(),
+        })
+
+    except Exception as exc:
+        counts["failed"] += 1
+        append_jsonl(log_paths["failed"], {
+            "step": "wikitext",
+            "index": index,
+            "page_title": title,
+            "error": str(exc),
+            "timestamp": utc_now_iso(),
+        })
+        return
+
+    if dry_run:
+        counts["would_act"] += 1
+        print_dry_run_diff(
+            index=index,
+            old_title=title,
+            new_title=title,
+            pending_moves=[],
+            pending_edits=pending_edits,
+            pending_before=pending_before,
+            heading=title,
+        )
+        return
+
+    try:
+        page.text = normalized_text
+        page.save(summary="规范化编辑标记", minor=False, botflag=True)
+        counts["acted"] += 1
+    except Exception as exc:
+        counts["failed"] += 1
+        append_jsonl(log_paths["failed"], {
+            "step": "execute",
+            "index": index,
+            "page_title": title,
+            "error": str(exc),
+            "timestamp": utc_now_iso(),
+        })
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
     args = parse_args()
 
-    old_path = args.old_jsonl.expanduser().resolve()
-    new_path = args.new_jsonl.expanduser().resolve()
+    lista_path: Path | None = None
+    old_path: Path | None = None
+    new_path: Path | None = None
 
-    for path in (old_path, new_path):
-        if not path.exists():
-            print(f"Error: file not found: {path}", file=sys.stderr)
+    if args.lista is not None:
+        lista_path = args.lista.expanduser().resolve()
+        if not lista_path.exists():
+            print(f"Error: file not found: {lista_path}", file=sys.stderr)
             return 1
+        input_root = lista_path.parent
+    else:
+        old_path = args.old_jsonl.expanduser().resolve()
+        new_path = args.new_jsonl.expanduser().resolve()
 
-    log_dir = (args.log_dir or new_path.parent).expanduser().resolve()
+        for path in (old_path, new_path):
+            if not path.exists():
+                print(f"Error: file not found: {path}", file=sys.stderr)
+                return 1
+        input_root = new_path.parent
+
+    log_dir = (args.log_dir or input_root).expanduser().resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_paths = build_log_paths(log_dir)
 
@@ -552,22 +689,39 @@ def main() -> int:
     site = get_site()
 
     console.print("=" * 72)
-    console.print("[bold cyan]JSONL Diff Reconciler[/bold cyan]")
+    if lista_path is not None:
+        console.print("[bold cyan]Page Wikitext Normalizer[/bold cyan]")
+    else:
+        console.print("[bold cyan]JSONL Diff Reconciler[/bold cyan]")
     console.print("=" * 72)
-    console.print(f"Old JSONL:   {old_path}")
-    console.print(f"New JSONL:   {new_path}")
+    if lista_path is not None:
+        console.print(f"Lista:       {lista_path}")
+    else:
+        console.print(f"Old JSONL:   {old_path}")
+        console.print(f"New JSONL:   {new_path}")
     console.print(f"Max entries: {args.max}")
     console.print(f"Log dir:     {log_dir}")
     console.print(f"Dry run:     {args.dry_run}")
     console.print("=" * 72)
     console.print()
 
-    console.print("Reading JSONL files…")
-    old_entries = read_jsonl_entries(old_path, args.max)
-    new_entries = read_jsonl_entries(new_path, args.max)
-    pair_count  = min(len(old_entries), len(new_entries))
-    console.print(f"Loaded {len(old_entries)} old / {len(new_entries)} new entries → {pair_count} pairs")
-    console.print()
+    if lista_path is not None:
+        console.print("Reading title list…")
+        titles = read_titles(lista_path, args.max)
+        total_count = len(titles)
+        mode_label = "Titles processed"
+        console.print(f"Loaded {total_count} titles")
+        console.print()
+    else:
+        console.print("Reading JSONL files…")
+        old_entries = read_jsonl_entries(old_path, args.max)
+        new_entries = read_jsonl_entries(new_path, args.max)
+        total_count = min(len(old_entries), len(new_entries))
+        mode_label = "Pairs compared"
+        console.print(
+            f"Loaded {len(old_entries)} old / {len(new_entries)} new entries → {total_count} pairs"
+        )
+        console.print()
 
     counts: dict[str, int] = {
         "unchanged": 0,
@@ -591,19 +745,31 @@ def main() -> int:
         console=console,
         transient=False,
     ) as progress:
-        task = progress.add_task("Reconciling…", total=pair_count)
+        task = progress.add_task("Reconciling…", total=total_count)
 
-        for idx in range(pair_count):
-            process_pair(
-                index=idx,
-                old_entry=old_entries[idx],
-                new_entry=new_entries[idx],
-                site=site,
-                dry_run=args.dry_run,
-                counts=counts,
-                log_paths=log_paths,
-            )
-            progress.advance(task)
+        if lista_path is not None:
+            for idx, title in enumerate(titles):
+                process_title(
+                    index=idx,
+                    title=title,
+                    site=site,
+                    dry_run=args.dry_run,
+                    counts=counts,
+                    log_paths=log_paths,
+                )
+                progress.advance(task)
+        else:
+            for idx in range(total_count):
+                process_pair(
+                    index=idx,
+                    old_entry=old_entries[idx],
+                    new_entry=new_entries[idx],
+                    site=site,
+                    dry_run=args.dry_run,
+                    counts=counts,
+                    log_paths=log_paths,
+                )
+                progress.advance(task)
 
     duration = datetime.now() - start
     action_label = "Would act" if args.dry_run else "Acted"
@@ -612,7 +778,7 @@ def main() -> int:
     console.print("=" * 72)
     console.print("[bold green]Done[/bold green]")
     console.print("=" * 72)
-    console.print(f"Pairs compared: {pair_count}")
+    console.print(f"{mode_label}: {total_count}")
     console.print(f"Unchanged:      {counts['unchanged']}")
     console.print(f"Invalid:        {counts['invalid']}")
     console.print(f"Skipped:        {counts['skipped']}")
