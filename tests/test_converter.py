@@ -80,8 +80,8 @@ class TestRedactionNormalization:
         assert normalize_redaction_markers("张三Ｘ×xx李四") == "张三{{PRC-redact|4}}李四"
 
     def test_single_marker_is_not_replaced(self):
-        assert normalize_redaction_markers("张三x李四") == "张三x李四"
-        assert normalize_redaction_markers("*") == "*"
+        assert normalize_redaction_markers("张三x李四") == "张三{{PRC-redact|1}}李四"
+        assert normalize_redaction_markers("*") == "{{PRC-redact|1}}"
 
 
 class TestTitleRedactionNormalization:
@@ -92,9 +92,9 @@ class TestTitleRedactionNormalization:
         assert normalize_title_redaction_markers("张三Xｘ*执行裁定书") == "张三×××执行裁定书"
 
     def test_title_single_marker_is_normalized(self):
-        assert normalize_title_redaction_markers("张三x执行裁定书") == "张三x执行裁定书"
-        assert normalize_title_redaction_markers("张三X执行裁定书") == "张三X执行裁定书"
-        assert normalize_title_redaction_markers("张三*执行裁定书") == "张三*执行裁定书"
+        assert normalize_title_redaction_markers("张三x执行裁定书") == "张三×执行裁定书"
+        assert normalize_title_redaction_markers("张三X执行裁定书") == "张三×执行裁定书"
+        assert normalize_title_redaction_markers("张三*执行裁定书") == "张三×执行裁定书"
 
 
 class TestRemoveCjkSpaces:

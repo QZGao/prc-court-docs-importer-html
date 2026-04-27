@@ -42,7 +42,7 @@ CJK_PATTERN = re.compile(
     r']'
 )
 
-REDACTION_SEQUENCE_PATTERN = re.compile(r'[×XxＸｘ*＊∗✱﹡⁎٭※]{2,}')
+REDACTION_SEQUENCE_PATTERN = re.compile(r'(?<![A-WYZa-wyz])[×XxＸｘ*＊∗✱﹡⁎٭※]+(?![A-WYZa-wyz])')
 
 
 def remove_cjk_spaces(text: str) -> str:
@@ -99,9 +99,7 @@ def normalize_redaction_markers(text: str) -> str:
     """
     Replace repeated redaction markers with {{PRC-redact}} templates.
 
-    Adjacent runs of two or more characters from ×, X, x, etc are
-    collapsed into a single template, always preserving the run length as
-    the first parameter.
+    Characters from ×, X, x, etc are collapsed into a single template, always preserving the run length as the first parameter.
     """
     if not text:
         return text
@@ -117,9 +115,7 @@ def normalize_title_redaction_markers(text: str) -> str:
     """
     Normalize repeated title redaction markers to literal multiplication signs.
 
-    Titles cannot use {{PRC-redact}}, so adjacent runs of two or more redaction
-    markers are rewritten as the same number of '×' characters. Single marker
-    characters are left unchanged.
+    Titles cannot use {{PRC-redact}}, so redaction markers are rewritten as the same number of '×' characters.
     """
     if not text:
         return text
