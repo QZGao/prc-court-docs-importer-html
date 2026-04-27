@@ -126,6 +126,34 @@ def build_redirect_title(record: dict[str, Any]) -> str:
     return court + case_num + doc_type
 
 
+_ADJACENT_REDACT_RE = re.compile(
+    r'(?:[×XxＸｘ*＊∗✱﹡⁎٭※]+|\{\{PRC-redact\|\d+\}\}){2,}'
+)
+_REDACT_ELEMENT_RE = re.compile(
+    r'(?P<chars>[×XxＸｘ*＊∗✱﹡⁎٭※]+)|\{\{PRC-redact\|(?P<n>\d+)\}\}'
+)
+
+
+def combine_adjacent_redactions(text: str) -> str:
+    """Merge runs of adjacent raw redaction chars and {{PRC-redact|N}} templates.
+
+    After normalize_redaction_markers runs on content that was already partially
+    normalised by the old buggy pattern (e.g. `*{{PRC-redact|1}}`), the lone raw
+    char becomes a second template yielding `{{PRC-redact|1}}{{PRC-redact|1}}`.
+    This function collapses any such adjacent sequence into one template.
+    """
+    def _merge(m: re.Match) -> str:
+        total = 0
+        for em in _REDACT_ELEMENT_RE.finditer(m.group(0)):
+            if em.group("chars"):
+                total += len(em.group("chars"))
+            else:
+                total += int(em.group("n"))
+        return f"{{{{PRC-redact|{total}}}}}"
+
+    return _ADJACENT_REDACT_RE.sub(_merge, text)
+
+
 def update_redirect_target(page_text: str, new_target: str) -> str:
     """Replace the redirect target inside #REDIRECT [[...]]."""
     return re.sub(
@@ -417,14 +445,14 @@ def process_pair(
                     landing_page = pywikibot.Page(site, pending_moves[0][0])
 
                 current_text = landing_page.text
-                normalized_text = normalize_redaction_markers(current_text)
+                normalized_text = combine_adjacent_redactions(normalize_redaction_markers(current_text))
 
                 if normalized_text != current_text:
                     existing = pending_edits.get(effective_landing_title)
                     if existing:
                         # Re-normalize the already-pending text; keep original as before
                         pending_edits[effective_landing_title] = (
-                            normalize_redaction_markers(existing[0]),
+                            combine_adjacent_redactions(normalize_redaction_markers(existing[0])),
                             existing[1] + "；规范化编辑标记",
                         )
                     else:

@@ -42,7 +42,15 @@ CJK_PATTERN = re.compile(
     r']'
 )
 
-REDACTION_SEQUENCE_PATTERN = re.compile(r'(?<![A-WYZa-wyz])[×XxＸｘ*＊∗✱﹡⁎٭※]+(?![A-WYZa-wyz\d.])')
+REDACTION_SEQUENCE_PATTERN = re.compile(
+    r'(?:'
+        r'(?<![A-WYZa-wyz])[XxＸｘ]'  # Latin-like chars: guard against preceding Latin letter
+        r'|'
+        r'[×*＊∗✱﹡⁎٭※]'              # Non-Latin chars: always safe to start here
+    r')'
+    r'[×XxＸｘ*＊∗✱﹡⁎٭※]*'           # Any continuation (mixed sequences: PTF**X etc.)
+    r'(?![A-WYZa-wyz\d.])'             # No following Latin letter, digit, or decimal point
+)
 
 
 def remove_cjk_spaces(text: str) -> str:
