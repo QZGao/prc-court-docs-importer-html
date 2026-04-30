@@ -94,12 +94,17 @@ python -m convert input.jsonl --filter "*判决书" --limit 50 --original origin
 #### 恢復中斷的作業
 
 ```bash
-# 若被中斷（Ctrl+C），從檢查點恢復
+# 若被中斷（Ctrl+C），使用預設檢查點路徑恢復
+python -m convert input.jsonl --resume
+
+# 從指定檢查點檔案恢復
 python -m convert --resume input_checkpoint.json
 
 # 恢復時也可設定新的限制數量
-python -m convert --resume input_checkpoint.json --limit 200
+python -m convert input.jsonl --resume --limit 200
 ```
+
+恢復是明確選擇的行為。若你沒有傳入 `--resume`，轉換器會視為全新執行，並覆寫輸出、錯誤與原始 JSON 檔，即使現有檢查點仍存在。若你傳入不帶路徑的 `--resume`，轉換器會使用 `--checkpoint` 或預設的 `<output>_checkpoint.json`。
 
 ### CLI 選項
 
@@ -110,7 +115,7 @@ python -m convert --resume input_checkpoint.json --limit 200
 | `--errors` | `-e` | 錯誤記錄 JSONL 檔案路徑 |
 | `--filter` | `-f` | 依標題篩選文書的 Glob 模式 |
 | `--limit` | `-l` | 最大成功轉換數量 |
-| `--resume` | `-r` | 從檢查點檔案恢復 |
+| `--resume` | `-r` | 從檢查點恢復；也可附帶指定檢查點路徑 |
 | `--checkpoint` | `-c` | 檢查點檔案路徑 |
 | `--txt` | `-t` | 人類可讀 TXT 輸出路徑 |
 | `--original` | | 儲存處理文書的原始 JSON |

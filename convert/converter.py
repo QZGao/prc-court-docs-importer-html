@@ -27,6 +27,17 @@ from .wikitext_renderer import render_wikitext
 console = Console()
 
 
+class ConversionInterrupted(KeyboardInterrupt):
+    """Raised when a conversion run is interrupted after partial progress."""
+
+    def __init__(self, success_count: int, error_count: int, skipped_count: int, last_doc_num: int):
+        super().__init__("Conversion interrupted")
+        self.success_count = success_count
+        self.error_count = error_count
+        self.skipped_count = skipped_count
+        self.last_doc_num = last_doc_num
+
+
 @dataclass
 class ConversionResult:
     """Result of converting a single document."""
@@ -266,6 +277,7 @@ def process_jsonl_stream(
     start_from: int = 0,
     max_success: Optional[int] = None,
     original_path: Optional[Path] = None,
+    append_output: bool = False,
 ) -> Tuple[int, int, int, int]:
     """
     Process a JSON file in streaming mode.
@@ -281,6 +293,8 @@ def process_jsonl_stream(
         start_from: Skip documents until this document number (1-indexed)
         max_success: Stop after this many successful conversions (None = no limit)
         original_path: Optional path to save original JSON for processed documents
+        append_output: Append to existing output files instead of overwriting them.
+            Intended for checkpoint-based resume runs.
         
     Returns:
         Tuple of (success_count, error_count, skipped_count, last_doc_num)
@@ -295,79 +309,83 @@ def process_jsonl_stream(
     
     # Open original file if requested
     orig_file = None
+    file_mode = 'a' if append_output else 'w'
     if original_path:
-        orig_file = open(original_path, 'a', encoding='utf-8')
-    
+        orig_file = open(original_path, file_mode, encoding='utf-8')
+
     try:
-        with open(input_path, 'r', encoding='utf-8') as infile, \
-             open(output_path, 'a', encoding='utf-8') as outfile, \
-             open(error_path, 'a', encoding='utf-8') as errfile:
-            
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                TextColumn("•"),
-                TimeRemainingColumn(),
-                console=console,
-                transient=False,
-            ) as progress:
-                task = progress.add_task(
-                    f"[cyan]0 docs: 0 success, 0 errors, 0 skipped",
-                    total=file_size
-                )
-                
-                current_bytes = 0
-                
-                def update_bytes(bytes_read: int):
-                    nonlocal current_bytes
-                    current_bytes = bytes_read
-                
-                for raw_json in iter_json_objects(infile, update_bytes):
-                    doc_num += 1
-                    
-                    # Update progress bar
+        try:
+            with open(input_path, 'r', encoding='utf-8') as infile, \
+                 open(output_path, file_mode, encoding='utf-8') as outfile, \
+                 open(error_path, file_mode, encoding='utf-8') as errfile:
+
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    TextColumn("•"),
+                    TimeRemainingColumn(),
+                    console=console,
+                    transient=False,
+                ) as progress:
+                    task = progress.add_task(
+                        f"[cyan]0 docs: 0 success, 0 errors, 0 skipped",
+                        total=file_size
+                    )
+
+                    current_bytes = 0
+
+                    def update_bytes(bytes_read: int):
+                        nonlocal current_bytes
+                        current_bytes = bytes_read
+
+                    for raw_json in iter_json_objects(infile, update_bytes):
+                        doc_num += 1
+
+                        # Update progress bar
+                        progress.update(
+                            task,
+                            completed=current_bytes,
+                            description=f"[cyan]{doc_num} docs: {success_count} success, {error_count} errors, {skipped_count} skipped"
+                        )
+
+                        # Skip documents if resuming
+                        if doc_num <= start_from:
+                            continue
+
+                        # Apply filter if provided
+                        if doc_filter and not doc_filter(raw_json):
+                            skipped_count += 1
+                            continue
+
+                        # Save original JSON if requested
+                        if orig_file:
+                            orig_file.write(json.dumps(raw_json, ensure_ascii=False) + '\n')
+
+                        # Convert document
+                        result, error = convert_document(raw_json)
+
+                        if result:
+                            outfile.write(json.dumps(asdict(result), ensure_ascii=False) + '\n')
+                            success_count += 1
+                        else:
+                            errfile.write(json.dumps(asdict(error), ensure_ascii=False) + '\n')
+                            error_count += 1
+
+                        # Check if we've reached the limit
+                        if max_success and success_count >= max_success:
+                            console.print(f"\n[yellow]Reached limit of {max_success} successful conversions.[/yellow]")
+                            break
+
+                    # Final update
                     progress.update(
                         task,
-                        completed=current_bytes,
-                        description=f"[cyan]{doc_num} docs: {success_count} success, {error_count} errors, {skipped_count} skipped"
+                        completed=file_size,
+                        description=f"[green]{doc_num} docs: {success_count} success, {error_count} errors, {skipped_count} skipped"
                     )
-                    
-                    # Skip documents if resuming
-                    if doc_num <= start_from:
-                        continue
-                    
-                    # Apply filter if provided
-                    if doc_filter and not doc_filter(raw_json):
-                        skipped_count += 1
-                        continue
-                    
-                    # Save original JSON if requested
-                    if orig_file:
-                        orig_file.write(json.dumps(raw_json, ensure_ascii=False) + '\n')
-                    
-                    # Convert document
-                    result, error = convert_document(raw_json)
-                    
-                    if result:
-                        outfile.write(json.dumps(asdict(result), ensure_ascii=False) + '\n')
-                        success_count += 1
-                    else:
-                        errfile.write(json.dumps(asdict(error), ensure_ascii=False) + '\n')
-                        error_count += 1
-                    
-                    # Check if we've reached the limit
-                    if max_success and success_count >= max_success:
-                        console.print(f"\n[yellow]Reached limit of {max_success} successful conversions.[/yellow]")
-                        break
-                
-                # Final update
-                progress.update(
-                    task,
-                    completed=file_size,
-                    description=f"[green]{doc_num} docs: {success_count} success, {error_count} errors, {skipped_count} skipped"
-                )
+        except KeyboardInterrupt as exc:
+            raise ConversionInterrupted(success_count, error_count, skipped_count, doc_num) from exc
     finally:
         if orig_file:
             orig_file.close()

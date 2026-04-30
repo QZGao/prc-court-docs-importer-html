@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import convert.__main__ as convert_cli
 from convert.html_normalizer import (
     normalize_html,
     clean_text,
@@ -30,6 +31,7 @@ from convert.location import (
     extract_province_from_court,
 )
 from convert.converter import (
+    ConversionInterrupted,
     convert_document,
     extract_doc_type_from_s22,
     infer_court_with_province,
@@ -46,6 +48,37 @@ def load_test_cases():
     """Load test cases using the converter's JSON reader."""
     with open(TEST_CASES_PATH, 'r', encoding='utf-8') as f:
         return list(iter_json_objects(f))
+
+
+def make_raw_case(
+    title: str,
+    ws_key: str,
+    doc_id: str,
+    court: str = "北京市第一中级人民法院",
+    doc_type: str = "民事判决书",
+) -> dict:
+    """Build a minimal raw record that successfully converts."""
+    return {
+        "s1": title,
+        "wsKey": ws_key,
+        "s2": court,
+        "s7": doc_id,
+        "s22": f"{court}\n{doc_type}\n{doc_id}",
+        "qwContent": f"""
+            <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>{court}</div>
+            <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>{doc_type}</div>
+            <div style='TEXT-ALIGN: right;'>{doc_id}</div>
+            <div style='TEXT-INDENT: 30pt;'>正文内容。</div>
+            <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+            <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
+        """,
+    }
+
+
+def write_jsonl(path: Path, records: list[dict]) -> None:
+    with open(path, 'w', encoding='utf-8') as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 class TestCleanText:
@@ -488,6 +521,267 @@ class TestTestCasesConversion:
         # Test passes if we processed all documents
         test_cases = load_test_cases()
         assert success_count + error_count == len(test_cases)
+
+
+class TestCheckpointBehavior:
+    def test_process_jsonl_stream_overwrites_existing_outputs_on_fresh_run(self, tmp_path):
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "output.jsonl"
+        error_path = tmp_path / "errors.jsonl"
+
+        write_jsonl(input_path, [
+            make_raw_case("甲案民事判决书", "doc-1", "（2024）京01民初1号"),
+            make_raw_case("乙案民事判决书", "doc-2", "（2024）京01民初2号"),
+        ])
+        output_path.write_text("stale-output\n", encoding='utf-8')
+        error_path.write_text("stale-error\n", encoding='utf-8')
+
+        success_count, error_count, skipped_count, last_doc_num = process_jsonl_stream(
+            input_path,
+            output_path,
+            error_path,
+        )
+
+        output_lines = output_path.read_text(encoding='utf-8').splitlines()
+        assert success_count == 2
+        assert error_count == 0
+        assert skipped_count == 0
+        assert last_doc_num == 2
+        assert len(output_lines) == 2
+        assert "stale-output" not in output_lines[0]
+        assert error_path.read_text(encoding='utf-8') == ""
+
+    def test_process_jsonl_stream_appends_when_resuming(self, tmp_path):
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "output.jsonl"
+        error_path = tmp_path / "errors.jsonl"
+
+        records = [
+            make_raw_case("甲案民事判决书", "doc-1", "（2024）京01民初1号"),
+            make_raw_case("乙案民事判决书", "doc-2", "（2024）京01民初2号"),
+        ]
+        write_jsonl(input_path, records)
+
+        first_result, first_error = convert_document(records[0])
+        assert first_error is None
+        output_path.write_text(json.dumps(first_result.__dict__, ensure_ascii=False) + "\n", encoding='utf-8')
+
+        success_count, error_count, skipped_count, last_doc_num = process_jsonl_stream(
+            input_path,
+            output_path,
+            error_path,
+            start_from=1,
+            append_output=True,
+        )
+
+        output_rows = [json.loads(line) for line in output_path.read_text(encoding='utf-8').splitlines()]
+        assert success_count == 1
+        assert error_count == 0
+        assert skipped_count == 0
+        assert last_doc_num == 2
+        assert [row["wenshu_id"] for row in output_rows] == ["doc-1", "doc-2"]
+
+    def test_main_ignores_checkpoint_without_resume(self, tmp_path, monkeypatch):
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "output.jsonl"
+        error_path = tmp_path / "output_failed.jsonl"
+        checkpoint_path = tmp_path / "output_checkpoint.json"
+
+        write_jsonl(input_path, [make_raw_case("甲案民事判决书", "doc-1", "（2024）京01民初1号")])
+        output_path.write_text("existing-output\n", encoding='utf-8')
+        checkpoint_path.write_text(json.dumps({
+            "input": str(input_path.absolute()),
+            "output": str(output_path.absolute()),
+            "errors": str(error_path.absolute()),
+            "filter": "*判决书",
+            "last_doc_num": 7,
+            "total_success": 5,
+            "total_errors": 1,
+            "original": None,
+            "txt": None,
+            "last_run": "2026-04-30T00:00:00",
+        }, ensure_ascii=False), encoding='utf-8')
+
+        seen = {}
+
+        def fake_process_jsonl_stream(
+            input_arg,
+            output_arg,
+            error_arg,
+            doc_filter,
+            start_from=0,
+            max_success=None,
+            original_path=None,
+            append_output=False,
+        ):
+            seen["input"] = input_arg
+            seen["output"] = output_arg
+            seen["error"] = error_arg
+            seen["start_from"] = start_from
+            seen["append_output"] = append_output
+            seen["has_filter"] = doc_filter is not None
+            return 0, 0, 0, start_from
+
+        monkeypatch.setattr(convert_cli, "process_jsonl_stream", fake_process_jsonl_stream)
+        monkeypatch.setattr(sys, "argv", [
+            "python",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ])
+
+        convert_cli.main()
+
+        assert seen["input"] == input_path
+        assert seen["output"] == output_path
+        assert seen["error"] == error_path
+        assert seen["start_from"] == 0
+        assert seen["append_output"] is False
+        assert seen["has_filter"] is False
+
+    def test_main_resume_auto_resolves_matching_checkpoint(self, tmp_path, monkeypatch):
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "output.jsonl"
+        error_path = tmp_path / "output_failed.jsonl"
+        checkpoint_path = tmp_path / "output_checkpoint.json"
+
+        write_jsonl(input_path, [make_raw_case("甲案民事判决书", "doc-1", "（2024）京01民初1号")])
+        output_path.write_text("existing-output\n", encoding='utf-8')
+        checkpoint_path.write_text(json.dumps({
+            "input": str(input_path.absolute()),
+            "output": str(output_path.absolute()),
+            "errors": str(error_path.absolute()),
+            "filter": "*判决书",
+            "last_doc_num": 7,
+            "total_success": 5,
+            "total_errors": 1,
+            "original": None,
+            "txt": None,
+            "last_run": "2026-04-30T00:00:00",
+        }, ensure_ascii=False), encoding='utf-8')
+
+        seen = {}
+
+        def fake_process_jsonl_stream(
+            input_arg,
+            output_arg,
+            error_arg,
+            doc_filter,
+            start_from=0,
+            max_success=None,
+            original_path=None,
+            append_output=False,
+        ):
+            seen["input"] = input_arg
+            seen["output"] = output_arg
+            seen["error"] = error_arg
+            seen["start_from"] = start_from
+            seen["append_output"] = append_output
+            seen["matches_filter"] = doc_filter({"s1": "甲案民事判决书"})
+            return 0, 0, 0, start_from
+
+        monkeypatch.setattr(convert_cli, "process_jsonl_stream", fake_process_jsonl_stream)
+        monkeypatch.setattr(sys, "argv", [
+            "python",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--filter",
+            "*判决书",
+            "--resume",
+        ])
+
+        convert_cli.main()
+
+        assert seen["input"] == input_path
+        assert seen["output"] == output_path
+        assert seen["error"] == error_path
+        assert seen["start_from"] == 7
+        assert seen["append_output"] is True
+        assert seen["matches_filter"] is True
+
+    def test_main_resume_explicit_checkpoint_path(self, tmp_path, monkeypatch):
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "output.jsonl"
+        error_path = tmp_path / "output_failed.jsonl"
+        checkpoint_path = tmp_path / "progress.json"
+
+        output_path.write_text("existing-output\n", encoding='utf-8')
+        checkpoint_path.write_text(json.dumps({
+            "input": str(input_path.absolute()),
+            "output": str(output_path.absolute()),
+            "errors": str(error_path.absolute()),
+            "filter": "*判决书",
+            "last_doc_num": 4,
+            "total_success": 3,
+            "total_errors": 1,
+            "original": None,
+            "txt": None,
+            "last_run": "2026-04-30T00:00:00",
+        }, ensure_ascii=False), encoding='utf-8')
+
+        seen = {}
+
+        def fake_process_jsonl_stream(
+            input_arg,
+            output_arg,
+            error_arg,
+            doc_filter,
+            start_from=0,
+            max_success=None,
+            original_path=None,
+            append_output=False,
+        ):
+            seen["input"] = input_arg
+            seen["output"] = output_arg
+            seen["error"] = error_arg
+            seen["start_from"] = start_from
+            seen["append_output"] = append_output
+            return 0, 0, 0, start_from
+
+        monkeypatch.setattr(convert_cli, "process_jsonl_stream", fake_process_jsonl_stream)
+        monkeypatch.setattr(sys, "argv", [
+            "python",
+            "--resume",
+            str(checkpoint_path),
+        ])
+
+        convert_cli.main()
+
+        assert seen["input"] == input_path
+        assert seen["output"] == output_path
+        assert seen["error"] == error_path
+        assert seen["start_from"] == 4
+        assert seen["append_output"] is True
+
+    def test_main_saves_interrupt_progress_to_checkpoint(self, tmp_path, monkeypatch):
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "output.jsonl"
+        checkpoint_path = tmp_path / "progress.json"
+
+        write_jsonl(input_path, [make_raw_case("甲案民事判决书", "doc-1", "（2024）京01民初1号")])
+
+        def fake_process_jsonl_stream(*args, **kwargs):
+            raise ConversionInterrupted(3, 1, 2, 11)
+
+        monkeypatch.setattr(convert_cli, "process_jsonl_stream", fake_process_jsonl_stream)
+        monkeypatch.setattr(sys, "argv", [
+            "python",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--checkpoint",
+            str(checkpoint_path),
+        ])
+
+        with pytest.raises(SystemExit) as excinfo:
+            convert_cli.main()
+
+        checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
+        assert excinfo.value.code == 130
+        assert checkpoint["last_doc_num"] == 11
+        assert checkpoint["total_success"] == 3
+        assert checkpoint["total_errors"] == 1
 
 
 if __name__ == "__main__":

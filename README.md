@@ -94,12 +94,17 @@ python -m convert input.jsonl --filter "*判决书" --limit 50 --original origin
 #### Resuming Interrupted Jobs
 
 ```bash
-# If interrupted (Ctrl+C), resume from checkpoint
+# If interrupted (Ctrl+C), resume using the default checkpoint path
+python -m convert input.jsonl --resume
+
+# Resume from an explicit checkpoint file
 python -m convert --resume input_checkpoint.json
 
 # Can also set a new limit when resuming
-python -m convert --resume input_checkpoint.json --limit 200
+python -m convert input.jsonl --resume --limit 200
 ```
+
+Resume is opt-in. If you do not pass `--resume`, the converter starts a fresh run and overwrites the output, error, and original JSON files, even if a checkpoint already exists. If you pass `--resume` without a path, the converter uses `--checkpoint` or the default `<output>_checkpoint.json`.
 
 ### CLI Options
 
@@ -110,7 +115,7 @@ python -m convert --resume input_checkpoint.json --limit 200
 | `--errors` | `-e` | Error log JSONL file path |
 | `--filter` | `-f` | Glob pattern(s) to filter documents by title |
 | `--limit` | `-l` | Maximum successful conversions |
-| `--resume` | `-r` | Resume from checkpoint file |
+| `--resume` | `-r` | Resume from checkpoint; optionally pass a checkpoint path |
 | `--checkpoint` | `-c` | Checkpoint file path |
 | `--txt` | `-t` | Human-readable TXT output path |
 | `--original` | | Save original JSON for processed documents |
