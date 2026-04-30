@@ -74,6 +74,11 @@ def _append_message(message: str, extra: str) -> str:
     return f"{message}; {extra}"
 
 
+def _build_progress_description(action: str, uploaded: int, failed: int, skipped: int) -> str:
+    """Build a consistent rich progress description for upload batches."""
+    return f"[cyan]{action}: {uploaded} ✓, {failed} ✗, {skipped} ⊘"
+
+
 def _is_header_landing_page(page_state) -> bool:
     """Return whether a resolved page lands on a real court-document page."""
     return bool(page_state and page_state.exists and page_state.content and is_header_page(page_state.content))
@@ -625,8 +630,9 @@ def process_upload_batch(
             console=console,
             transient=False,
         ) as progress:
+            task_action = "Fast-forwarding" if skip_lines > 0 else "Uploading"
             task = progress.add_task(
-                "[cyan]Uploading: 0 ✓, 0 ✗, 0 ⊘",
+                _build_progress_description(task_action, 0, 0, 0),
                 total=file_size,
                 line_num=0,
             )
@@ -645,6 +651,15 @@ def process_upload_batch(
                     lines_skipped += 1
                     progress.update(task, completed=bytes_read, line_num=current_line_num)
                     continue
+
+                if task_action != "Uploading":
+                    task_action = "Uploading"
+                    progress.update(
+                        task,
+                        completed=bytes_read,
+                        line_num=current_line_num,
+                        description=_build_progress_description(task_action, uploaded_count + resolved_count, failed_count, skipped_count),
+                    )
 
                 line = line.strip()
                 if not line:
@@ -672,7 +687,12 @@ def process_upload_batch(
                         task, 
                         completed=bytes_read,
                         line_num=current_line_num,
-                        description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+                        description=_build_progress_description(
+                            task_action,
+                            uploaded_count + resolved_count,
+                            failed_count,
+                            skipped_count,
+                        ),
                     )
                     continue
                 
@@ -697,7 +717,12 @@ def process_upload_batch(
                         task, 
                         completed=bytes_read,
                         line_num=current_line_num,
-                        description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
+                        description=_build_progress_description(
+                            task_action,
+                            uploaded_count + resolved_count,
+                            failed_count,
+                            skipped_count,
+                        ),
                     )
                     continue
                 
@@ -732,7 +757,12 @@ def process_upload_batch(
                         task,
                         completed=bytes_read,
                         line_num=current_line_num,
-                        description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count + overwritable_count} ⊘"
+                        description=_build_progress_description(
+                            task_action,
+                            uploaded_count + resolved_count,
+                            failed_count,
+                            skipped_count + overwritable_count,
+                        ),
                     )
 
             if batch_docs:

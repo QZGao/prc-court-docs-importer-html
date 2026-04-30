@@ -586,3 +586,109 @@ def test_process_upload_batch_invalidates_stale_prefetch_after_write(tmp_path, m
     assert (uploaded, failed, skipped, resolved, overwritable) == (1, 0, 1, 0, 0)
     assert save_calls.count(title) == 1
     assert save_calls.count(case_title) == 1
+
+
+def test_process_upload_batch_uses_fast_forwarding_label_while_skipping(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.jsonl"
+    uploaded_log = tmp_path / "uploaded.jsonl"
+    failed_log = tmp_path / "failed.jsonl"
+    skipped_log = tmp_path / "skipped.jsonl"
+    overwritable_log = tmp_path / "overwritable.jsonl"
+
+    skipped_title = "甲案民事判决书"
+    active_title = "乙案民事判决书"
+    active_wikitext = make_header_page(
+        title=active_title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终2号",
+    )
+
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"title": skipped_title, "wenshu_id": "skip-1", "wikitext": "ignored"}, ensure_ascii=False),
+                json.dumps({"title": active_title, "wenshu_id": "doc-2", "wikitext": active_wikitext}, ensure_ascii=False),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    descriptions = []
+
+    class FakeProgress:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def add_task(self, description, **kwargs):
+            descriptions.append(description)
+            return "task-1"
+
+        def update(self, task_id, **kwargs):
+            description = kwargs.get("description")
+            if description is not None:
+                descriptions.append(description)
+
+    def fake_fetch_page_content_batch(titles, batch_size):
+        return {
+            title: PageSnapshot(
+                requested_title=title,
+                exists=False,
+                canonical_title=title,
+                content=None,
+            )
+            for title in titles
+        }
+
+    def fake_resolve_pages_batch(titles, batch_size):
+        return {
+            title: ResolvedPage(
+                requested_title=title,
+                exists=False,
+            )
+            for title in titles
+        }
+
+    def fake_upload_document(
+        *,
+        title,
+        wenshu_id,
+        wikitext,
+        resolve_conflicts,
+        force_overwrite,
+        existing_page,
+        case_page,
+    ):
+        return uploader.UploadResult(
+            title=title,
+            wenshu_id=wenshu_id,
+            status="uploaded",
+            final_title=title,
+            case_title=uploader.build_case_title_from_content(wikitext),
+            message="Created successfully",
+            timestamp=uploader.utc_now_iso(),
+        )
+
+    monkeypatch.setattr(uploader, "Progress", FakeProgress)
+    monkeypatch.setattr(uploader, "fetch_page_content_batch", fake_fetch_page_content_batch)
+    monkeypatch.setattr(uploader, "resolve_pages_batch", fake_resolve_pages_batch)
+    monkeypatch.setattr(uploader, "upload_document", fake_upload_document)
+
+    uploaded, failed, skipped, resolved, overwritable = uploader.process_upload_batch(
+        input_path=input_path,
+        uploaded_log=uploaded_log,
+        failed_log=failed_log,
+        skipped_log=skipped_log,
+        overwritable_log=overwritable_log,
+        skip_lines=1,
+    )
+
+    assert (uploaded, failed, skipped, resolved, overwritable) == (1, 0, 0, 0, 0)
+    assert descriptions[0].startswith("[cyan]Fast-forwarding:")
+    assert any(description.startswith("[cyan]Uploading:") for description in descriptions[1:])
