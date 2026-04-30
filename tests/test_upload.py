@@ -5,6 +5,7 @@ Tests for upload-time redirect creation, batching, and conflict resolution.
 import json
 from textwrap import dedent
 
+from upload import mediawiki
 from upload.mediawiki import PageSnapshot, ResolvedPage
 from upload import uploader
 from upload import conflict_resolution
@@ -53,6 +54,43 @@ def make_versions_page(title: str, court: str, entry_title: str) -> str:
         [[Category:{court}]]
         """
     )
+
+
+def test_post_query_uses_pywikibot_simple_request(monkeypatch):
+    seen = {}
+
+    class FakeRequest:
+        def submit(self):
+            seen["submitted"] = True
+            return {"query": {"pages": []}}
+
+    class FakeSite:
+        def simple_request(self, **kwargs):
+            seen["params"] = kwargs
+            return FakeRequest()
+
+    monkeypatch.setattr(mediawiki, "get_site", lambda: FakeSite())
+
+    payload = mediawiki.post_query(
+        {
+            "titles": "甲|乙",
+            "prop": "revisions",
+            "rvprop": "content",
+        },
+        maxlag=9,
+    )
+
+    assert payload == {"query": {"pages": []}}
+    assert seen["submitted"] is True
+    assert seen["params"] == {
+        "action": "query",
+        "format": "json",
+        "formatversion": "2",
+        "maxlag": 9,
+        "titles": "甲|乙",
+        "prop": "revisions",
+        "rvprop": "content",
+    }
 
 
 def test_upload_document_creates_case_redirect_after_upload(monkeypatch):

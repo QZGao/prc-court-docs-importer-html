@@ -11,7 +11,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Callable, Any
-import requests
 
 # Project root directory (where this module's package lives)
 # MUST be set before importing pywikibot!
@@ -65,11 +64,8 @@ SITE_FAMILY = 'wikisource'
 DEFAULT_EDIT_INTERVAL = 3.0  # seconds between edits
 DEFAULT_MAXLAG = 5
 DEFAULT_READ_BATCH_SIZE = 20
-API_URL = "https://zh.wikisource.org/w/api.php"
-USER_AGENT = "prc-court-docs-importer-html/1.0 (SuperGrey)"
 
 _site: Optional[Site] = None
-_api_session: Optional[requests.Session] = None
 
 
 @dataclass
@@ -148,37 +144,22 @@ def get_site() -> Site:
     return _site
 
 
-def get_api_session() -> requests.Session:
-    """Get or create the shared read-only API session."""
-    global _api_session
-
-    if _api_session is None:
-        _api_session = requests.Session()
-        _api_session.headers.update({"User-Agent": USER_AGENT})
-
-    return _api_session
-
-
 def batched(items: list[str], batch_size: int) -> list[list[str]]:
     """Split a list into fixed-size batches."""
     return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
 
 
 def post_query(data: dict[str, Any], maxlag: int = DEFAULT_MAXLAG) -> dict[str, Any]:
-    """Perform a read-only MediaWiki API query."""
-    response = get_api_session().post(
-        API_URL,
-        data={
+    """Perform a batched read query through pywikibot's request layer."""
+    payload = get_site().simple_request(
+        **{
             "action": "query",
             "format": "json",
             "formatversion": "2",
             "maxlag": maxlag,
             **data,
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    payload = response.json()
+        }
+    ).submit()
     if "error" in payload:
         raise RuntimeError(payload["error"])
     return payload
