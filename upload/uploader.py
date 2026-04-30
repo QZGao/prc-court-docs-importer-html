@@ -620,31 +620,36 @@ def process_upload_batch(
             BarColumn(),
             TaskProgressColumn(),
             TextColumn("•"),
+            TextColumn("[magenta]line {task.fields[line_num]:,}[/magenta]"),
+            TextColumn("•"),
             TimeRemainingColumn(),
             console=console,
             transient=False,
         ) as progress:
             task = progress.add_task(
                 "[cyan]Uploading: 0 ✓, 0 ✗, 0 ⊘",
-                total=file_size
+                total=file_size,
+                line_num=0,
             )
 
             batch_docs: list[dict] = []
             lines_skipped = 0
+            current_line_num = 0
 
-            for line in infile:
+            for source_line_num, line in enumerate(infile, start=1):
+                current_line_num = source_line_num
                 # Track bytes read for progress
                 bytes_read += len(line.encode('utf-8'))
 
                 # Skip leading lines before processing
                 if lines_skipped < skip_lines:
                     lines_skipped += 1
-                    progress.update(task, completed=bytes_read)
+                    progress.update(task, completed=bytes_read, line_num=current_line_num)
                     continue
 
                 line = line.strip()
                 if not line:
-                    progress.update(task, completed=bytes_read)
+                    progress.update(task, completed=bytes_read, line_num=current_line_num)
                     continue
 
                 doc_num += 1
@@ -667,6 +672,7 @@ def process_upload_batch(
                     progress.update(
                         task, 
                         completed=bytes_read,
+                        line_num=current_line_num,
                         description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
                     )
                     continue
@@ -691,6 +697,7 @@ def process_upload_batch(
                     progress.update(
                         task, 
                         completed=bytes_read,
+                        line_num=current_line_num,
                         description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count} ⊘"
                     )
                     continue
@@ -725,6 +732,7 @@ def process_upload_batch(
                     progress.update(
                         task,
                         completed=bytes_read,
+                        line_num=current_line_num,
                         description=f"[cyan]Uploading: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count + overwritable_count} ⊘"
                     )
 
@@ -748,6 +756,7 @@ def process_upload_batch(
             progress.update(
                 task,
                 completed=file_size,
+                line_num=current_line_num,
                 description=f"[green]Complete: {uploaded_count + resolved_count} ✓, {failed_count} ✗, {skipped_count + overwritable_count} ⊘"
             )
     
