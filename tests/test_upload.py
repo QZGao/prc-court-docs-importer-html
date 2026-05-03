@@ -41,11 +41,25 @@ def make_header_page(
 def make_versions_page(title: str, court: str, entry_title: str) -> str:
     return dedent(
         f"""\
+        {{{{裁判文书消歧义页
+         | title      = {title}
+         | court      = {court}
+         | type       = 民事判决书
+         | year       = 2024
+        }}}}
+        * [[{entry_title}]]
+        """
+    )
+
+
+def make_legacy_versions_page(title: str, court: str, entry_title: str) -> str:
+    return dedent(
+        f"""\
         {{{{versions
          | title      = {title}
          | noauthor   = {court}
-         | portal     = 
-         | notes      = 
+         | portal     =
+         | notes      =
         }}}}
         * [[{entry_title}]]
 
@@ -300,6 +314,91 @@ def test_try_resolve_conflict_skips_unchanged_versions_page_save(monkeypatch):
     assert error is None
 
 
+def test_try_resolve_conflict_accepts_legacy_versions_page(monkeypatch):
+    original_title = "共享标题"
+    court = "北京市第一中级人民法院"
+    existing_case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    draft_case_title = "北京市第一中级人民法院（2024）京01民终2号民事判决书"
+    draft_content = make_header_page(
+        title=original_title,
+        court=court,
+        doc_type="民事判决书",
+        case_number="（2024）京01民终2号",
+    )
+    existing_content = make_legacy_versions_page(
+        title=original_title,
+        court=court,
+        entry_title=existing_case_title,
+    )
+    saves = []
+
+    def fake_save_page(target_title, content, summary, **kwargs):
+        saves.append((target_title, content, summary))
+        return True
+
+    monkeypatch.setattr(conflict_resolution, "save_page", fake_save_page)
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is True
+    assert new_title == draft_case_title
+    assert error is None
+    assert saves[0][0] == original_title
+    assert "{{裁判文书消歧义页" in saves[0][1]
+    assert "{{versions" not in saves[0][1]
+    assert "| court      = 北京市第一中级人民法院" in saves[0][1]
+    assert "| type       = 民事判决书" in saves[0][1]
+    assert "| year       = 2024" in saves[0][1]
+    assert f"* [[{existing_case_title}]]" in saves[0][1]
+    assert f"* [[{draft_case_title}]]" in saves[0][1]
+    assert "[[Category:" not in saves[0][1]
+    assert "转换为裁判文书消歧义页" in saves[0][2]
+
+
+def test_try_resolve_conflict_converts_legacy_versions_page_even_when_entry_exists(monkeypatch):
+    original_title = "共享标题"
+    court = "北京市第一中级人民法院"
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    draft_content = make_header_page(
+        title=original_title,
+        court=court,
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = make_legacy_versions_page(
+        title=original_title,
+        court=court,
+        entry_title=case_title,
+    )
+    saves = []
+
+    def fake_save_page(target_title, content, summary, **kwargs):
+        saves.append((target_title, content, summary))
+        return True
+
+    monkeypatch.setattr(conflict_resolution, "save_page", fake_save_page)
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is True
+    assert new_title == case_title
+    assert error is None
+    assert saves[0][0] == original_title
+    assert "{{裁判文书消歧义页" in saves[0][1]
+    assert "{{versions" not in saves[0][1]
+    assert f"* [[{case_title}]]" in saves[0][1]
+    assert "[[Category:" not in saves[0][1]
+    assert saves[0][2] == "转换为裁判文书消歧义页"
+
+
 def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(monkeypatch):
     original_title = "共享标题"
     court = "北京市第一中级人民法院"
@@ -365,7 +464,7 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
         (
             original_title,
             existing_case_title,
-            f"移动至具体案号页面，原标题改为版本页：[[{original_title}]]",
+            f"移动至具体案号页面，原标题改为消歧义页：[[{original_title}]]",
             True,
             True,
         )
@@ -373,7 +472,11 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
     assert saves[0][0] == existing_case_title
     assert "[[共享标题]]" in saves[0][1]
     assert saves[1][0] == original_title
-    assert "{{versions" in saves[1][1]
+    assert "{{裁判文书消歧义页" in saves[1][1]
+    assert "| court      = 北京市第一中级人民法院" in saves[1][1]
+    assert "| type       = 民事判决书" in saves[1][1]
+    assert "| year       = 2024" in saves[1][1]
+    assert "[[Category:" not in saves[1][1]
 
 
 def test_process_upload_batch_prefetches_page_queries(tmp_path, monkeypatch):

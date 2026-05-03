@@ -2,9 +2,9 @@
 Conflict resolution for duplicate page titles.
 
 Handles two scenarios:
-1. Existing page is a {{versions}} page - add new entry to it
+1. Existing page is a {{裁判文书消歧义页}} or legacy {{versions}} page - add new entry to it
 2. Existing page is a {{Header/裁判文书}} page from same court - create a
-   versions page and move or relocate the existing document to its case title
+   disambiguation page and move or relocate the existing document to its case title
 """
 
 import re
@@ -21,6 +21,7 @@ from .page_metadata import (
     build_case_title_from_content,
     build_case_title_from_metadata,
     is_header_page,
+    is_legacy_versions_page,
     is_versions_page,
     parse_header_metadata,
     parse_versions_metadata,
@@ -31,13 +32,21 @@ from .page_metadata import (
 # Type for log callback: (message, is_success) -> None
 LogCallback = Callable[[str, bool], None]
 
+CATEGORY_LINE_RE = re.compile(
+    r"^\s*\[\[\s*(?:Category|分类|分類)\s*:\s*([^\]\|\n]+)"
+    r"(?:\|[^\]\n]*)?\]\]\s*$",
+    re.IGNORECASE,
+)
+YEAR_TYPE_CATEGORY_RE = re.compile(r"^(\d{4})年(?:中华人民共和国)?(.+)$")
+ENTRY_LINE_RE = re.compile(r"\s*\*\s*\[\[([^\]]+)\]\]")
+
 
 def extract_versions_noauthor(content: str) -> Optional[str]:
-    """Extract the noauthor field from a {{Versions}} page."""
+    """Extract the court/noauthor field from a disambiguation page."""
     metadata = parse_versions_metadata(content)
     if not metadata:
         return None
-    value = metadata.get("noauthor", "").strip()
+    value = (metadata.get("court", "") or metadata.get("noauthor", "")).strip()
     return value or None
 
 
@@ -105,7 +114,7 @@ def build_versions_page_content(
     header_type: str,
 ) -> str:
     """
-    Build a {{versions}} page content.
+    Build a {{裁判文书消歧义页}} page content.
 
     Args:
         title: The original page title
@@ -117,23 +126,85 @@ def build_versions_page_content(
     sorted_titles = sorted(set(entry_titles))
     entries = "\n".join(f"* [[{t}]]" for t in sorted_titles)
 
-    content = f"""{{{{versions
+    content = f"""{{{{裁判文书消歧义页
  | title      = {title}
- | noauthor   = {noauthor}
- | portal     = 
- | notes      = 
+ | court      = {noauthor}
+ | type       = {header_type}
+ | year       = {year}
 }}}}
 {entries}
-
-[[Category:{year}年中华人民共和国{header_type}]]
-[[Category:中华人民共和国{header_type}]]
-[[Category:{noauthor}]]
 """
     return content
 
 
+def extract_versions_entries(content: str) -> list[str]:
+    """Extract linked entries from a disambiguation page."""
+    entries: list[str] = []
+    for line in content.splitlines():
+        match = ENTRY_LINE_RE.match(line)
+        if match:
+            entries.append(match.group(1).strip())
+    return entries
+
+
+def extract_category_titles(content: str) -> list[str]:
+    """Extract category titles from page text."""
+    titles: list[str] = []
+    for line in content.splitlines():
+        match = CATEGORY_LINE_RE.match(line)
+        if match:
+            titles.append(match.group(1).strip())
+    return titles
+
+
+def infer_year_type_from_categories(content: str) -> tuple[Optional[str], Optional[str]]:
+    """Infer (year, type) from old versions-page category lines."""
+    categories = set(extract_category_titles(content))
+    for category_title in sorted(categories):
+        match = YEAR_TYPE_CATEGORY_RE.match(category_title)
+        if not match:
+            continue
+        year = match.group(1)
+        header_type = match.group(2)
+        if header_type in categories or f"中华人民共和国{header_type}" in categories:
+            return year, header_type
+    return None, None
+
+
+def convert_legacy_versions_page_content(
+    *,
+    original_title: str,
+    existing_content: str,
+    fallback_court: str,
+    fallback_year: str,
+    fallback_type: str,
+    entry_titles: list[str],
+) -> Optional[str]:
+    """Convert legacy {{versions}} content to {{裁判文书消歧义页}} content."""
+    if not is_legacy_versions_page(existing_content):
+        return None
+
+    metadata = parse_versions_metadata(existing_content) or {}
+    title = metadata.get("title", "").strip() or original_title
+    court = (metadata.get("court", "") or metadata.get("noauthor", "")).strip() or fallback_court
+    inferred_year, inferred_type = infer_year_type_from_categories(existing_content)
+    year = inferred_year or fallback_year
+    header_type = inferred_type or fallback_type
+
+    if not court or not year or not header_type:
+        return None
+
+    return build_versions_page_content(
+        title=title,
+        noauthor=court,
+        entry_titles=entry_titles,
+        year=year,
+        header_type=header_type,
+    )
+
+
 def add_entry_to_versions_page(content: str, new_entry_title: str) -> str:
-    """Add a new entry to an existing {{versions}} page and sort all entries."""
+    """Add a new entry to an existing disambiguation page and sort all entries."""
     lines = content.split("\n")
 
     # Extract all existing entries
@@ -141,7 +212,7 @@ def add_entry_to_versions_page(content: str, new_entry_title: str) -> str:
     entry_line_indices = []
     for i, line in enumerate(lines):
         if line.strip().startswith("* [["):
-            match = re.match(r"\s*\*\s*\[\[([^\]]+)\]\]", line)
+            match = ENTRY_LINE_RE.match(line)
             if match:
                 existing_entries.append(match.group(1))
                 entry_line_indices.append(i)
@@ -220,7 +291,7 @@ def try_resolve_conflict(
     if not draft_court:
         return False, None, "Could not extract court from draft header"
 
-    # Check if existing page is a versions page
+    # Check if existing page is a court-document disambiguation page
     if is_versions_page(existing_content):
         return _resolve_versions_page_conflict(
             original_title,
@@ -247,7 +318,7 @@ def try_resolve_conflict(
             log_callback,
         )
 
-    return False, None, "Existing page is neither {{Versions}} nor {{Header/裁判文书}}"
+    return False, None, "Existing page is neither {{裁判文书消歧义页}} nor {{Header/裁判文书}}"
 
 
 def _resolve_versions_page_conflict(
@@ -257,20 +328,20 @@ def _resolve_versions_page_conflict(
     draft_noauthor: str,
     log_callback: Optional[LogCallback] = None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Resolve conflict when existing page is a {{versions}} page."""
+    """Resolve conflict when existing page is a court-document disambiguation page."""
 
     def log(msg: str, ok: bool = True):
         if log_callback:
             log_callback(msg, ok)
 
-    log(f"Detected existing {{{{versions}}}} page: [[{original_title}]]", True)
+    log(f"Detected existing court-document disambiguation page: [[{original_title}]]", True)
 
     existing_noauthor = extract_versions_noauthor(existing_content)
     if existing_noauthor and existing_noauthor != draft_noauthor:
         return (
             False,
             None,
-            f"Court mismatch with versions page: existing='{existing_noauthor}', draft='{draft_noauthor}'",
+            f"Court mismatch with disambiguation page: existing='{existing_noauthor}', draft='{draft_noauthor}'",
         )
 
     new_draft_title = build_case_title_from_content(draft_content)
@@ -278,11 +349,27 @@ def _resolve_versions_page_conflict(
         return False, None, "Could not extract case-number title from draft"
     log(f"New draft title: [[{new_draft_title}]]", True)
 
-    # Update versions page with new entry
+    # Update disambiguation page with new entry
+    existing_entries = extract_versions_entries(existing_content)
+    new_entry_already_present = new_draft_title in existing_entries
     updated_versions = add_entry_to_versions_page(existing_content, new_draft_title)
+    if is_legacy_versions_page(existing_content):
+        draft_metadata = extract_header_metadata(draft_content) or {}
+        all_entries = extract_versions_entries(updated_versions)
+        converted_versions = convert_legacy_versions_page_content(
+            original_title=original_title,
+            existing_content=existing_content,
+            fallback_court=draft_noauthor,
+            fallback_year=draft_metadata.get("year", "").strip(),
+            fallback_type=draft_metadata.get("type", "").strip(),
+            entry_titles=all_entries,
+        )
+        if converted_versions:
+            updated_versions = converted_versions
+
     if wikitexts_match(updated_versions, existing_content):
         log(
-            f"Versions page [[{original_title}]] already contains [[{new_draft_title}]]",
+            f"Disambiguation page [[{original_title}]] already contains [[{new_draft_title}]]",
             True,
         )
         return True, new_draft_title, None
@@ -291,11 +378,17 @@ def _resolve_versions_page_conflict(
         save_page(
             original_title,
             updated_versions,
-            summary=f"添加新条目：[[{new_draft_title}]]",
+            summary=(
+                "转换为裁判文书消歧义页"
+                if is_legacy_versions_page(existing_content) and new_entry_already_present
+                else f"转换为裁判文书消歧义页并添加新条目：[[{new_draft_title}]]"
+                if is_legacy_versions_page(existing_content)
+                else f"添加新条目：[[{new_draft_title}]]"
+            ),
         )
-        log(f"Updated versions page [[{original_title}]] with new entry", True)
+        log(f"Updated disambiguation page [[{original_title}]] with new entry", True)
     except Exception as e:
-        return False, None, f"Failed to update versions page: {e}"
+        return False, None, f"Failed to update disambiguation page: {e}"
 
     return True, new_draft_title, None
 
@@ -346,7 +439,7 @@ def _resolve_header_page_conflict(
             move_page(
                 original_title,
                 new_existing_title,
-                reason=f"移动至具体案号页面，原标题改为版本页：[[{original_title}]]",
+                reason=f"移动至具体案号页面，原标题改为消歧义页：[[{original_title}]]",
                 leave_redirect=True,
             )
             log(f"Moved [[{original_title}]] → [[{new_existing_title}]]", True)
@@ -355,7 +448,7 @@ def _resolve_header_page_conflict(
                 move_page(
                     original_title,
                     new_existing_title,
-                    reason=f"移动至具体案号页面，原标题改为版本页：[[{original_title}]]",
+                    reason=f"移动至具体案号页面，原标题改为消歧义页：[[{original_title}]]",
                     leave_redirect=True,
                     ignore_warnings=True,
                 )
@@ -401,13 +494,13 @@ def _resolve_header_page_conflict(
             save_page(
                 new_existing_title,
                 updated_existing,
-                summary=f"更新标题链接至版本页：[[{original_title}]]",
+                summary=f"更新标题链接至消歧义页：[[{original_title}]]",
             )
-            log(f"Updated [[{new_existing_title}]] with title link to versions page", True)
+            log(f"Updated [[{new_existing_title}]] with title link to disambiguation page", True)
     except Exception as e:
         return False, None, f"Failed to update moved page: {e}"
 
-    # Step 3: Create versions page at original title
+    # Step 3: Create disambiguation page at original title
     try:
         versions_content = build_versions_page_content(
             title=original_title,
@@ -419,11 +512,11 @@ def _resolve_header_page_conflict(
         save_page(
             original_title,
             versions_content,
-            summary=f"创建版本页，包含：[[{new_existing_title}]]、[[{new_draft_title}]]",
+            summary=f"创建消歧义页，包含：[[{new_existing_title}]]、[[{new_draft_title}]]",
         )
-        log(f"Created versions page at [[{original_title}]]", True)
+        log(f"Created disambiguation page at [[{original_title}]]", True)
     except Exception as e:
-        return False, None, f"Failed to create versions page: {e}"
+        return False, None, f"Failed to create disambiguation page: {e}"
 
     return True, new_draft_title, None
 
@@ -455,12 +548,12 @@ def is_conflict_resolvable(
     if not draft_court:
         return False, "Could not extract court from draft header"
 
-    # Check if existing page is a versions page
+    # Check if existing page is a court-document disambiguation page
     if is_versions_page(existing_content):
         existing_noauthor = extract_versions_noauthor(existing_content)
         if existing_noauthor and existing_noauthor != draft_court:
-            return False, "Court mismatch with versions page"
-        return True, "Existing page is a {{versions}} page"
+            return False, "Court mismatch with disambiguation page"
+        return True, "Existing page is a {{裁判文书消歧义页}} page"
 
     # Check if existing page is a header page from same court
     if is_header_page(existing_content):
@@ -471,4 +564,4 @@ def is_conflict_resolvable(
             return False, "Court mismatch: different courts"
         return True, "Existing page is a {{Header/裁判文书}} page from same court"
 
-    return False, "Existing page is neither {{Versions}} nor {{Header/裁判文书}}"
+    return False, "Existing page is neither {{裁判文书消歧义页}} nor {{Header/裁判文书}}"

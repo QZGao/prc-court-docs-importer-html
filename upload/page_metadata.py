@@ -2,7 +2,8 @@
 Helpers for parsing upload-side page metadata.
 
 These utilities understand the current court-document page format based on
-{{Header/裁判文书}}, {{Versions}}, and standard MediaWiki redirects.
+{{Header/裁判文书}}, {{裁判文书消歧义页}}, legacy {{Versions}}, and standard
+MediaWiki redirects.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from typing import Optional
 REDIRECT_CATEGORY = "中华人民共和国法院裁判文书案号重定向"
 REQUIRED_CASE_TITLE_FIELDS = ("court", "案号", "type")
 HEADER_TEMPLATE_PREFIXES = ("{{header/裁判文书",)
-VERSIONS_TEMPLATE_PREFIXES = ("{{versions",)
+COURT_DISAMBIG_TEMPLATE_PREFIXES = ("{{裁判文书消歧义页",)
+LEGACY_VERSIONS_TEMPLATE_PREFIXES = ("{{versions",)
+VERSIONS_TEMPLATE_PREFIXES = COURT_DISAMBIG_TEMPLATE_PREFIXES + LEGACY_VERSIONS_TEMPLATE_PREFIXES
 REDIRECT_PATTERN = re.compile(r"^\s*#redirect\s*\[\[([^\]]+)\]\]", re.IGNORECASE | re.MULTILINE)
 
 
@@ -72,7 +75,7 @@ def parse_header_metadata(page_text: str) -> Optional[dict[str, str]]:
 
 
 def parse_versions_metadata(page_text: str) -> Optional[dict[str, str]]:
-    """Parse metadata from {{Versions}}."""
+    """Parse metadata from {{裁判文书消歧义页}} or legacy {{Versions}}."""
     return parse_template_metadata(page_text, VERSIONS_TEMPLATE_PREFIXES)
 
 
@@ -86,12 +89,21 @@ def is_header_page(page_text: str) -> bool:
 
 
 def is_versions_page(page_text: str) -> bool:
-    """Return whether page text starts with {{Versions}}."""
+    """Return whether page text starts with a court-document disambiguation template."""
     if not page_text:
         return False
 
     stripped = page_text.lstrip().lower()
     return any(stripped.startswith(prefix) for prefix in VERSIONS_TEMPLATE_PREFIXES)
+
+
+def is_legacy_versions_page(page_text: str) -> bool:
+    """Return whether page text starts with legacy {{versions}}."""
+    if not page_text:
+        return False
+
+    stripped = page_text.lstrip().lower()
+    return any(stripped.startswith(prefix) for prefix in LEGACY_VERSIONS_TEMPLATE_PREFIXES)
 
 
 def build_case_title_from_metadata(metadata: dict[str, str]) -> Optional[str]:
