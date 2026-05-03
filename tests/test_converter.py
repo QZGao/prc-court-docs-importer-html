@@ -22,6 +22,7 @@ from convert.html_normalizer import (
     normalize_redaction_markers,
     normalize_title_redaction_markers,
     remove_cjk_spaces,
+    remove_unicode_other_chars,
 )
 from convert.wikitext_renderer import (
     convert_html_to_wikitext,
@@ -98,6 +99,19 @@ class TestCleanText:
     
     def test_none_handling(self):
         assert clean_text(None) == ""
+
+    def test_invisible_unicode_other_chars_removed(self):
+        assert clean_text("张三\u200e李四\u200b") == "张三李四"
+
+
+class TestUnicodeOtherNormalization:
+    """Tests for invisible Unicode Other-category cleanup."""
+
+    def test_format_chars_removed(self):
+        assert remove_unicode_other_chars("甲\u200e乙\u200b丙\ufeff") == "甲乙丙"
+
+    def test_structural_controls_preserved_for_later_normalization(self):
+        assert remove_unicode_other_chars("法院\n判决书\t案号") == "法院\n判决书\t案号"
 
 
 class TestRedactionNormalization:
@@ -470,6 +484,38 @@ class TestWikitextRendering:
         assert result is not None
         assert result.doc_id == "（2024）京01执123号"
         assert "|案号 = （2024）京01执123号" in result.wikitext
+
+    def test_convert_document_removes_invisible_unicode_other_chars(self):
+        raw_json = {
+            "s1": "测试\u200e执行裁定书",
+            "wsKey": "doc\u200e-3",
+            "s2": "北京市第一中级\u200e人民法院",
+            "s7": "（2024）京01执\u200e123号",
+            "s22": "北京市第一中级\u200e人民法院\n执行裁定书\n（2024）京01执\u200e123号",
+            "qwContent": """
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市第一中级\u200e人民法院</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+                <div style='TEXT-ALIGN: right;'>（2024）京01执\u200e123号</div>
+                <div style='TEXT-INDENT: 30pt;'>正文\u200b内容。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.title == "测试执行裁定书"
+        assert result.court == "北京市第一中级人民法院"
+        assert result.doc_id == "（2024）京01执123号"
+        assert "\u200e" not in result.wikitext
+        assert "\u200b" not in result.wikitext
+        assert result.wenshu_id == "doc-3"
+        assert "|docid = doc-3" in result.wikitext
+        assert "|court = 北京市第一中级人民法院" in result.wikitext
+        assert "|案号 = （2024）京01执123号" in result.wikitext
+        assert "正文内容。" in result.wikitext
 
 
 class TestTestCasesConversion:

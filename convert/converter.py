@@ -21,6 +21,7 @@ from .html_normalizer import (
     normalize_redaction_markers,
     normalize_title_redaction_markers,
     remove_cjk_spaces,
+    remove_unicode_other_chars,
 )
 from .wikitext_renderer import render_wikitext
 
@@ -127,15 +128,21 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
     
     try:
         # 1. Extract required fields
-        title = normalize_title_redaction_markers(remove_cjk_spaces(raw_json.get('s1', '').strip()))
+        title = normalize_title_redaction_markers(
+            remove_cjk_spaces(remove_unicode_other_chars(raw_json.get('s1', '').strip()))
+        )
         # Normalize middle dot variants to standard middle dot (·)
         title = re.sub(r'[．‧•･・]', '·', title)
-        wenshu_id = raw_json.get('wsKey', '').strip()
-        court_s2 = normalize_redaction_markers(remove_cjk_spaces(raw_json.get('s2', '').strip()))
-        doc_id = normalize_case_number_parentheses(
-            normalize_redaction_markers(raw_json.get('s7', '').strip())
+        wenshu_id = remove_unicode_other_chars(raw_json.get('wsKey', '').strip())
+        court_s2 = normalize_redaction_markers(
+            remove_cjk_spaces(remove_unicode_other_chars(raw_json.get('s2', '').strip()))
         )
-        s22 = normalize_redaction_markers(remove_cjk_spaces(raw_json.get('s22', '').strip()))
+        doc_id = normalize_case_number_parentheses(
+            normalize_redaction_markers(remove_unicode_other_chars(raw_json.get('s7', '').strip()))
+        )
+        s22 = normalize_redaction_markers(
+            remove_cjk_spaces(remove_unicode_other_chars(raw_json.get('s22', '').strip()))
+        )
         html_content = raw_json.get('qwContent', '')
         
         if not title:

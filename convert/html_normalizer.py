@@ -9,6 +9,7 @@ This module provides deterministic HTML-to-block-segmentation conversion:
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional, Tuple
@@ -51,6 +52,27 @@ REDACTION_SEQUENCE_PATTERN = re.compile(
     r'[×XxＸｘ*＊∗✱﹡⁎٭※]*'           # Any continuation (mixed sequences: PTF**X etc.)
     r'(?![A-WYZa-wyz\d.])'             # No following Latin letter, digit, or decimal point
 )
+
+ALLOWED_UNICODE_OTHER_CHARS = {"\n", "\r", "\t"}
+
+
+def remove_unicode_other_chars(text: str) -> str:
+    """
+    Remove invisible/control Unicode "Other" characters from text.
+
+    MediaWiki tags edits containing these characters as "unicode other"
+    / 加入不可見字元. Preserve line and tab controls here because other
+    normalization steps may still need structural newlines, especially s22.
+    """
+    if not text:
+        return text
+
+    return ''.join(
+        char
+        for char in text
+        if char in ALLOWED_UNICODE_OTHER_CHARS
+        or not unicodedata.category(char).startswith('C')
+    )
 
 
 def remove_cjk_spaces(text: str) -> str:
@@ -180,12 +202,15 @@ class ParsedDocument:
 
 def clean_text(text: str) -> str:
     """
-    Clean text content by normalizing whitespace and removing control characters.
+    Clean text content by normalizing whitespace and removing invisible characters.
     Preserves meaningful spaces but collapses multiple spaces.
     Also removes spaces between CJK characters (OCR artifacts).
     """
     if not text:
         return ""
+
+    # Remove invisible Unicode Other-category characters before whitespace cleanup.
+    text = remove_unicode_other_chars(text)
     
     # Replace various whitespace characters with regular spaces
     text = re.sub(r'[\t\r\n\f\v]+', ' ', text)
