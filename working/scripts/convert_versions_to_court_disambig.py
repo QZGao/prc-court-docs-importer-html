@@ -6,8 +6,8 @@ For each main-namespace page in Category:版本页, this script looks for old
 {{versions}} pages that contain an explicit court category ending in 法院]].
 It infers:
 
-  * year from [[Category:YYYY年中华人民共和国TYPE]]
-  * type from [[Category:中华人民共和国TYPE]]
+  * year from [[Category:YYYY年中华人民共和国TYPE]] or [[Category:YYYY年TYPE]]
+  * type from [[Category:中华人民共和国TYPE]] or [[Category:TYPE]]
   * court from [[Category:COURT]]
 
 Then it replaces the {{versions}} template and removes those three explicit
@@ -49,8 +49,7 @@ CATEGORY_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 PARAM_RE = re.compile(r"^\s*\|\s*([^=]+?)\s*=\s*(.*)$")
-YEAR_TYPE_CATEGORY_RE = re.compile(r"^(\d{4})年中华人民共和国(.+)$")
-TYPE_CATEGORY_RE = re.compile(r"^中华人民共和国(.+)$")
+YEAR_TYPE_CATEGORY_RE = re.compile(r"^(\d{4})年(?:中华人民共和国)?(.+)$")
 VERSIONS_START_RE = re.compile(r"\{\{\s*versions\b", re.IGNORECASE)
 
 
@@ -186,6 +185,14 @@ def extract_category_titles(text: str) -> list[str]:
     return titles
 
 
+def find_type_category(doc_type: str, categories: set[str]) -> str | None:
+    """Return the matching explicit type category, with or without country prefix."""
+    for candidate in (f"中华人民共和国{doc_type}", doc_type):
+        if candidate in categories:
+            return candidate
+    return None
+
+
 def infer_metadata(text: str, fallback_title: str) -> InferredMetadata | None:
     span = find_versions_template_span(text)
     if span is None:
@@ -196,8 +203,8 @@ def infer_metadata(text: str, fallback_title: str) -> InferredMetadata | None:
     title = params.get("title") or fallback_title
 
     categories = extract_category_titles(text)
+    category_set = set(categories)
     year_type_matches: list[tuple[str, str, str]] = []
-    plain_types: set[str] = set()
     courts: list[str] = []
 
     for category_title in categories:
@@ -210,16 +217,12 @@ def infer_metadata(text: str, fallback_title: str) -> InferredMetadata | None:
             ))
             continue
 
-        type_match = TYPE_CATEGORY_RE.match(category_title)
-        if type_match:
-            plain_types.add(type_match.group(1))
-            continue
-
         if category_title.endswith("法院"):
             courts.append(category_title)
 
     for year, doc_type, year_category in year_type_matches:
-        if doc_type not in plain_types:
+        type_category = find_type_category(doc_type, category_set)
+        if type_category is None:
             continue
         if not courts:
             return None
@@ -231,7 +234,7 @@ def infer_metadata(text: str, fallback_title: str) -> InferredMetadata | None:
             year=year,
             category_titles={
                 year_category,
-                f"中华人民共和国{doc_type}",
+                type_category,
                 court,
             },
         )
