@@ -151,7 +151,7 @@ def build_case_redirect_text(source_title: str) -> str:
 
 def build_case_redirect_summary(source_title: str) -> str:
     """Build the edit summary for case-number redirects."""
-    return f"按案号创建重定向至[[{source_title}]]"
+    return f"按案号创建重定向"
 
 
 def normalize_wikitext_for_comparison(page_text: Optional[str]) -> str:

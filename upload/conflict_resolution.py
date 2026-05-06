@@ -381,9 +381,9 @@ def _resolve_versions_page_conflict(
             summary=(
                 "转换为裁判文书消歧义页"
                 if is_legacy_versions_page(existing_content) and new_entry_already_present
-                else f"转换为裁判文书消歧义页并添加新条目：[[{new_draft_title}]]"
+                else f"转换为裁判文书消歧义页并添加新条目"
                 if is_legacy_versions_page(existing_content)
-                else f"添加新条目：[[{new_draft_title}]]"
+                else f"添加新条目"
             ),
         )
         log(f"Updated disambiguation page [[{original_title}]] with new entry", True)
@@ -460,7 +460,7 @@ def _resolve_header_page_conflict(
                 save_page(
                     new_existing_title,
                     existing_content,
-                    summary=f"以具体案号页面替换重定向：[[{original_title}]]",
+                    summary=f"以具体案号页面替换重定向",
                 )
                 log(
                     f"Replaced redirect [[{new_existing_title}]] with existing document content",
@@ -494,7 +494,7 @@ def _resolve_header_page_conflict(
             save_page(
                 new_existing_title,
                 updated_existing,
-                summary=f"更新标题链接至消歧义页：[[{original_title}]]",
+                summary=f"更新标题链接至消歧义页",
             )
             log(f"Updated [[{new_existing_title}]] with title link to disambiguation page", True)
     except Exception as e:
@@ -512,7 +512,7 @@ def _resolve_header_page_conflict(
         save_page(
             original_title,
             versions_content,
-            summary=f"创建消歧义页，包含：[[{new_existing_title}]]、[[{new_draft_title}]]",
+            summary=f"创建消歧义页",
         )
         log(f"Created disambiguation page at [[{original_title}]]", True)
     except Exception as e:
