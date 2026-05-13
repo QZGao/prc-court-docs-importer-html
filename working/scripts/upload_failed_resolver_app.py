@@ -294,8 +294,8 @@ def get_component_func():
     let timer = null;
     let debounceTimer = null;
     let lastSentValue = null;
-    let pendingSentValue = null;
     let suppressInputValue = null;
+    let appliedValueVersion = null;
     let editorInitPromise = null;
     let mediaWikiModulePromise = null;
     let mediaWikiConfigPromise = null;
@@ -311,7 +311,6 @@ def get_component_func():
 
     function setValue(value) {
       lastSentValue = value;
-      pendingSentValue = value;
       send("streamlit:setComponentValue", {value: value});
     }
 
@@ -481,6 +480,7 @@ def get_component_func():
       const value = args.value || "";
       const debounceMs = Number(args.debounce_ms || 1200);
 
+      appliedValueVersion = String(args.value_version || "0");
       textarea.value = value;
 
       try {
@@ -531,15 +531,9 @@ def get_component_func():
 
     function updateEditor(args) {
       const nextValue = args.value || "";
-      if (pendingSentValue !== null) {
-        if (nextValue === pendingSentValue) {
-          pendingSentValue = null;
-        } else {
-          return;
-        }
-      }
-
-      if (getCurrentValue() !== nextValue && lastSentValue !== nextValue) {
+      const nextValueVersion = String(args.value_version || "0");
+      if (nextValueVersion !== appliedValueVersion) {
+        appliedValueVersion = nextValueVersion;
         applyExternalValue(nextValue);
       }
     }
@@ -595,6 +589,7 @@ def codemirror_editor(value: str, *, key: str, height: int = 640) -> str:
     returned = _component_func(
         kind="editor",
         value=value,
+        value_version=st.session_state.get(f"{key}_value_version", 0),
         mode="mediawiki",
         theme="eclipse",
         height=height,
@@ -709,6 +704,8 @@ def initialize_editor_state(record: dict[str, Any], index: int) -> tuple[str, st
         st.session_state[f"{prefix}_case_title"] = default_case_title
     if f"{prefix}_wikitext" not in st.session_state:
         st.session_state[f"{prefix}_wikitext"] = draft_wikitext
+    if f"{prefix}_editor_value_version" not in st.session_state:
+        st.session_state[f"{prefix}_editor_value_version"] = 0
     if f"{prefix}_editor_target" not in st.session_state:
         st.session_state[f"{prefix}_editor_target"] = (
             "existing" if classify_failure(record) == "existing_header_metadata" else "draft"
@@ -717,10 +714,51 @@ def initialize_editor_state(record: dict[str, Any], index: int) -> tuple[str, st
     return prefix, default_title, default_case_title, draft_wikitext
 
 
+def bump_editor_value_version(prefix: str) -> None:
+    version_key = f"{prefix}_editor_value_version"
+    st.session_state[version_key] = int(st.session_state.get(version_key) or 0) + 1
+
+
+def apply_editor_state_update(prefix: str, update: dict[str, Any]) -> None:
+    if "draft_title" in update:
+        st.session_state[f"{prefix}_draft_title"] = update.get("draft_title") or ""
+    if "title" in update:
+        st.session_state[f"{prefix}_title"] = update.get("title") or ""
+    if "target" in update:
+        st.session_state[f"{prefix}_editor_target"] = update.get("target") or "draft"
+    if "wikitext" in update:
+        st.session_state[f"{prefix}_wikitext"] = update.get("wikitext") or ""
+    if "case_title" in update:
+        st.session_state[f"{prefix}_case_title"] = update.get("case_title") or ""
+    if "target" in update or "wikitext" in update:
+        bump_editor_value_version(prefix)
+
+
+def queue_editor_state_update(prefix: str, update: dict[str, Any]) -> None:
+    st.session_state[f"{prefix}_pending_editor_update"] = update
+
+
+def apply_pending_editor_state_update(prefix: str) -> None:
+    pending_key = f"{prefix}_pending_editor_update"
+    pending = st.session_state.pop(pending_key, None)
+    if isinstance(pending, dict):
+        apply_editor_state_update(prefix, pending)
+
+
+def editor_target_update(target: str, wikitext: str, case_title: str = "") -> dict[str, Any]:
+    return {
+        "target": target,
+        "wikitext": wikitext or "",
+        "case_title": case_title or build_case_title_from_content(wikitext or "") or "",
+    }
+
+
 def set_current_editor_target(prefix: str, target: str, wikitext: str, case_title: str = "") -> None:
-    st.session_state[f"{prefix}_editor_target"] = target
-    st.session_state[f"{prefix}_wikitext"] = wikitext or ""
-    st.session_state[f"{prefix}_case_title"] = case_title or build_case_title_from_content(wikitext or "") or ""
+    apply_editor_state_update(prefix, editor_target_update(target, wikitext, case_title))
+
+
+def queue_current_editor_target(prefix: str, target: str, wikitext: str, case_title: str = "") -> None:
+    queue_editor_state_update(prefix, editor_target_update(target, wikitext, case_title))
 
 
 def get_draft_title(record: dict[str, Any], prefix: str) -> str:
@@ -738,14 +776,25 @@ def get_draft_wikitext(record: dict[str, Any]) -> str:
     return record.get("wikitext") or source_row.get("wikitext") or ""
 
 
-def switch_to_draft_editor(record: dict[str, Any], prefix: str, draft_wikitext: Optional[str] = None) -> None:
+def draft_editor_update(record: dict[str, Any], prefix: str, draft_wikitext: Optional[str] = None) -> dict[str, Any]:
     source_row = get_draft_from_source(record) or {}
     wikitext = draft_wikitext if draft_wikitext is not None else get_draft_wikitext(record)
-    st.session_state[f"{prefix}_draft_title"] = (
-        record.get("final_title") or record.get("title") or source_row.get("title") or ""
-    )
-    st.session_state[f"{prefix}_title"] = st.session_state[f"{prefix}_draft_title"]
-    set_current_editor_target(prefix, "draft", wikitext or "", build_case_title_from_content(wikitext or ""))
+    draft_title = record.get("final_title") or record.get("title") or source_row.get("title") or ""
+    return {
+        "draft_title": draft_title,
+        "title": draft_title,
+        "target": "draft",
+        "wikitext": wikitext or "",
+        "case_title": build_case_title_from_content(wikitext or "") or "",
+    }
+
+
+def switch_to_draft_editor(record: dict[str, Any], prefix: str, draft_wikitext: Optional[str] = None) -> None:
+    apply_editor_state_update(prefix, draft_editor_update(record, prefix, draft_wikitext))
+
+
+def queue_switch_to_draft_editor(record: dict[str, Any], prefix: str, draft_wikitext: Optional[str] = None) -> None:
+    queue_editor_state_update(prefix, draft_editor_update(record, prefix, draft_wikitext))
 
 
 def fetch_existing_page_into_editor(record: dict[str, Any], prefix: str) -> None:
@@ -763,7 +812,7 @@ def fetch_existing_page_into_editor(record: dict[str, Any], prefix: str) -> None
         st.warning(f"Existing page not found: {title}")
         append_log("fetch_existing_missing", record, title=title)
         return
-    set_current_editor_target(prefix, "existing", content, build_case_title_from_content(content))
+    queue_current_editor_target(prefix, "existing", content, build_case_title_from_content(content))
     append_log("fetch_existing", record, title=title)
     st.rerun()
 
@@ -838,7 +887,6 @@ def submit_draft_upload(
     wenshu_id = updated.get("wenshu_id") or updated.get("wenshuID") or ""
 
     if not title or not wikitext:
-        switch_to_draft_editor(record, prefix, wikitext)
         st.error("Both title and wikitext are required before retrying.")
         return
 
@@ -857,9 +905,8 @@ def submit_draft_upload(
     except Exception as exc:
         append_log("retry_exception", updated, title=title, error=str(exc))
         st.session_state.last_result = {"status": "failed", "message": str(exc)}
-        switch_to_draft_editor(record, prefix, wikitext)
-        st.error(f"Retry failed before uploader returned a result: {exc}")
-        return
+        queue_switch_to_draft_editor(record, prefix, wikitext)
+        st.rerun()
 
     result_dict = asdict(result)
     st.session_state.last_result = result_dict
@@ -889,7 +936,7 @@ def submit_draft_upload(
             "case_title": result.case_title or updated.get("case_title"),
             "redirect_status": result.redirect_status,
         }
-    switch_to_draft_editor(records[st.session_state.current_index] if records else updated, prefix, wikitext)
+    queue_switch_to_draft_editor(records[st.session_state.current_index] if records else updated, prefix, wikitext)
     st.rerun()
 
 
@@ -933,8 +980,7 @@ def save_existing_page_and_retry(record: dict[str, Any], prefix: str) -> None:
             "status": "saved_existing_only",
             "message": "Existing page saved, but no draft wikitext was available for retry.",
         }
-        switch_to_draft_editor(record, prefix, "")
-        st.warning("Existing page saved. Load the original converted JSONL or paste draft wikitext to retry.")
+        queue_switch_to_draft_editor(record, prefix, "")
         st.rerun()
         return
 
@@ -1143,6 +1189,7 @@ def main() -> None:
     failure_kind = classify_failure(record)
     if failure_kind == "existing_header_metadata":
         auto_fetch_existing_page_into_editor(record, prefix)
+    apply_pending_editor_state_update(prefix)
     editor_target = st.session_state.get(f"{prefix}_editor_target", "draft")
 
     st.caption(
@@ -1185,7 +1232,7 @@ def main() -> None:
                     fetch_existing_page_into_editor(record, prefix)
         with button_cols[1]:
             if editor_target == "draft" and source_row and st.button("Use source draft", use_container_width=True):
-                switch_to_draft_editor(record, prefix, source_row.get("wikitext") or "")
+                queue_switch_to_draft_editor(record, prefix, source_row.get("wikitext") or "")
                 st.rerun()
         with button_cols[2]:
             if st.button("Clear result", use_container_width=True):
