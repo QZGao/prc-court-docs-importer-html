@@ -39,6 +39,8 @@ CATEGORY_LINE_RE = re.compile(
 )
 YEAR_TYPE_CATEGORY_RE = re.compile(r"^(\d{4})年(?:中华人民共和国)?(.+)$")
 ENTRY_LINE_RE = re.compile(r"\s*\*\s*\[\[([^\]]+)\]\]")
+SECTION_HEADING_RE = re.compile(r"^\s*==\s*(.*?)\s*==\s*$")
+CASE_NUMBER_SORT_RE = re.compile(r"^(.*?)(\d+)号(.*)$")
 
 
 def extract_versions_noauthor(content: str) -> Optional[str]:
@@ -110,8 +112,8 @@ def build_versions_page_content(
     title: str,
     noauthor: str,
     entry_titles: List[str],
-    year: str,
-    header_type: str,
+    year: str = "",
+    header_type: str = "",
 ) -> str:
     """
     Build a {{裁判文书消歧义页}} page content.
@@ -120,21 +122,70 @@ def build_versions_page_content(
         title: The original page title
         noauthor: Court name
         entry_titles: List of page titles to link to
-        year: Year from header
+        year: Ignored; retained for compatibility with older callers
         header_type: Full type from header
     """
-    sorted_titles = sorted(set(entry_titles))
+    sorted_titles = sort_versions_entries(entry_titles)
     entries = "\n".join(f"* [[{t}]]" for t in sorted_titles)
 
     content = f"""{{{{裁判文书消歧义页
  | title      = {title}
  | court      = {noauthor}
  | type       = {header_type}
- | year       = {year}
 }}}}
 {entries}
 """
     return content
+
+
+def case_number_sort_key(title: str) -> tuple[str, int, str]:
+    """Sort by text before the final case number, numeric case number, then suffix."""
+    match = CASE_NUMBER_SORT_RE.match(title)
+    if not match:
+        return title, -1, ""
+    return match.group(1), int(match.group(2)), match.group(3)
+
+
+def sort_versions_entries(entry_titles: list[str]) -> list[str]:
+    """Deduplicate and sort disambiguation entries by case-number syntax."""
+    return sorted(set(entry_titles), key=case_number_sort_key)
+
+
+def infer_court_from_case_title(title: str) -> Optional[str]:
+    """Infer court from a case-number page title formatted as court + （case number） + type."""
+    court, separator, _ = title.partition("（")
+    if not separator:
+        return None
+    return court.strip() or None
+
+
+def build_grouped_versions_page_content(
+    *,
+    title: str,
+    header_type: str,
+    court_entries: dict[str, list[str]],
+) -> str:
+    """Build a cross-court {{裁判文书消歧义页}} page grouped by court."""
+    lines = [
+        "{{裁判文书消歧义页",
+        f" | title      = {title}",
+        f" | type       = {header_type}",
+        "}}",
+    ]
+
+    for court in sorted(court_entries):
+        entries = sort_versions_entries(court_entries[court])
+        if not court or not entries:
+            continue
+        lines.extend(
+            [
+                f"=={court}==",
+                f"[[Category:{court}]]",
+                *[f"* [[{entry}]]" for entry in entries],
+            ]
+        )
+
+    return "\n".join(lines) + "\n"
 
 
 def extract_versions_entries(content: str) -> list[str]:
@@ -145,6 +196,25 @@ def extract_versions_entries(content: str) -> list[str]:
         if match:
             entries.append(match.group(1).strip())
     return entries
+
+
+def extract_grouped_versions_entries(content: str, default_court: Optional[str] = None) -> dict[str, list[str]]:
+    """Extract disambiguation entries grouped by court heading or default court."""
+    grouped_entries: dict[str, list[str]] = {}
+    current_court = default_court or ""
+
+    for line in content.splitlines():
+        heading_match = SECTION_HEADING_RE.match(line)
+        if heading_match:
+            current_court = heading_match.group(1).strip()
+            grouped_entries.setdefault(current_court, [])
+            continue
+
+        entry_match = ENTRY_LINE_RE.match(line)
+        if entry_match:
+            grouped_entries.setdefault(current_court, []).append(entry_match.group(1).strip())
+
+    return grouped_entries
 
 
 def extract_category_titles(content: str) -> list[str]:
@@ -188,23 +258,65 @@ def convert_legacy_versions_page_content(
     title = metadata.get("title", "").strip() or original_title
     court = (metadata.get("court", "") or metadata.get("noauthor", "")).strip() or fallback_court
     inferred_year, inferred_type = infer_year_type_from_categories(existing_content)
-    year = inferred_year or fallback_year
     header_type = inferred_type or fallback_type
 
-    if not court or not year or not header_type:
+    if not court or not header_type:
         return None
 
     return build_versions_page_content(
         title=title,
         noauthor=court,
         entry_titles=entry_titles,
-        year=year,
         header_type=header_type,
     )
 
 
-def add_entry_to_versions_page(content: str, new_entry_title: str) -> str:
+def add_entry_to_versions_page(
+    content: str,
+    new_entry_title: str,
+    new_entry_court: Optional[str] = None,
+    header_type: Optional[str] = None,
+) -> str:
     """Add a new entry to an existing disambiguation page and sort all entries."""
+    metadata = parse_versions_metadata(content) or {}
+    title = metadata.get("title", "").strip()
+    existing_court = (metadata.get("court", "") or metadata.get("noauthor", "")).strip()
+    page_type = (metadata.get("type", "") or header_type or "").strip()
+
+    if title and page_type:
+        if existing_court and new_entry_court and existing_court != new_entry_court:
+            grouped_entries = extract_grouped_versions_entries(content, default_court=existing_court)
+            grouped_entries.setdefault(new_entry_court, []).append(new_entry_title)
+            return build_grouped_versions_page_content(
+                title=title,
+                header_type=page_type,
+                court_entries=grouped_entries,
+            )
+
+        effective_new_entry_court = new_entry_court or infer_court_from_case_title(new_entry_title)
+        if not existing_court and effective_new_entry_court:
+            grouped_entries = extract_grouped_versions_entries(content)
+            orphan_entries = grouped_entries.pop("", [])
+            for entry in orphan_entries:
+                inferred_court = infer_court_from_case_title(entry)
+                if inferred_court:
+                    grouped_entries.setdefault(inferred_court, []).append(entry)
+            grouped_entries.setdefault(effective_new_entry_court, []).append(new_entry_title)
+            return build_grouped_versions_page_content(
+                title=title,
+                header_type=page_type,
+                court_entries=grouped_entries,
+            )
+
+        if existing_court:
+            all_entries = extract_versions_entries(content) + [new_entry_title]
+            return build_versions_page_content(
+                title=title,
+                noauthor=existing_court,
+                entry_titles=all_entries,
+                header_type=page_type,
+            )
+
     lines = content.split("\n")
 
     # Extract all existing entries
@@ -219,7 +331,7 @@ def add_entry_to_versions_page(content: str, new_entry_title: str) -> str:
 
     # Add new entry, deduplicate, and sort
     all_entries = existing_entries + [new_entry_title]
-    sorted_entries = sorted(set(all_entries))
+    sorted_entries = sort_versions_entries(all_entries)
 
     if entry_line_indices:
         if (
@@ -303,18 +415,10 @@ def try_resolve_conflict(
 
     # Check if existing page is a header page
     if is_header_page(existing_content):
-        existing_court = extract_header_court(existing_content)
-        if existing_court != draft_court:
-            return (
-                False,
-                None,
-                f"Court mismatch: existing='{existing_court}', draft='{draft_court}'",
-            )
         return _resolve_header_page_conflict(
             original_title,
             draft_content,
             existing_content,
-            draft_court,
             log_callback,
         )
 
@@ -336,36 +440,36 @@ def _resolve_versions_page_conflict(
 
     log(f"Detected existing court-document disambiguation page: [[{original_title}]]", True)
 
-    existing_noauthor = extract_versions_noauthor(existing_content)
-    if existing_noauthor and existing_noauthor != draft_noauthor:
-        return (
-            False,
-            None,
-            f"Court mismatch with disambiguation page: existing='{existing_noauthor}', draft='{draft_noauthor}'",
-        )
-
     new_draft_title = build_case_title_from_content(draft_content)
     if not new_draft_title:
         return False, None, "Could not extract case-number title from draft"
     log(f"New draft title: [[{new_draft_title}]]", True)
 
+    draft_metadata = extract_header_metadata(draft_content) or {}
+    draft_type = draft_metadata.get("type", "").strip()
+
     # Update disambiguation page with new entry
     existing_entries = extract_versions_entries(existing_content)
     new_entry_already_present = new_draft_title in existing_entries
-    updated_versions = add_entry_to_versions_page(existing_content, new_draft_title)
+    base_versions = existing_content
     if is_legacy_versions_page(existing_content):
-        draft_metadata = extract_header_metadata(draft_content) or {}
-        all_entries = extract_versions_entries(updated_versions)
         converted_versions = convert_legacy_versions_page_content(
             original_title=original_title,
             existing_content=existing_content,
             fallback_court=draft_noauthor,
             fallback_year=draft_metadata.get("year", "").strip(),
-            fallback_type=draft_metadata.get("type", "").strip(),
-            entry_titles=all_entries,
+            fallback_type=draft_type,
+            entry_titles=existing_entries,
         )
         if converted_versions:
-            updated_versions = converted_versions
+            base_versions = converted_versions
+
+    updated_versions = add_entry_to_versions_page(
+        base_versions,
+        new_draft_title,
+        new_entry_court=draft_noauthor,
+        header_type=draft_type,
+    )
 
     if wikitexts_match(updated_versions, existing_content):
         log(
@@ -397,7 +501,6 @@ def _resolve_header_page_conflict(
     original_title: str,
     draft_content: str,
     existing_content: str,
-    court: str,
     log_callback: Optional[LogCallback] = None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """Resolve conflict when existing page is a {{Header/裁判文书}} page."""
@@ -405,11 +508,6 @@ def _resolve_header_page_conflict(
     def log(msg: str, ok: bool = True):
         if log_callback:
             log_callback(msg, ok)
-
-    log(
-        f"Detected existing {{{{Header/裁判文书}}}} page from same court: [[{original_title}]]",
-        True,
-    )
 
     draft_metadata = extract_header_metadata(draft_content)
     existing_metadata = extract_header_metadata(existing_content)
@@ -420,12 +518,24 @@ def _resolve_header_page_conflict(
     new_draft_title = build_case_title_from_metadata(draft_metadata)
     existing_court = existing_metadata.get("court", "").strip()
     existing_header_type = existing_metadata.get("type", "").strip()
-    existing_year = existing_metadata.get("year", "").strip()
+    draft_court = draft_metadata.get("court", "").strip()
+    draft_header_type = draft_metadata.get("type", "").strip()
+
+    if existing_court == draft_court:
+        log(
+            f"Detected existing {{{{Header/裁判文书}}}} page from same court: [[{original_title}]]",
+            True,
+        )
+    else:
+        log(
+            f"Detected existing {{{{Header/裁判文书}}}} page from different court: [[{original_title}]]",
+            True,
+        )
 
     if not new_existing_title or not new_draft_title:
         return False, None, "Could not build case-number title from header metadata"
-    if not existing_court or not existing_header_type or not existing_year:
-        return False, None, "Could not extract court/type/year from existing page header"
+    if not existing_court or not existing_header_type:
+        return False, None, "Could not extract court/type from existing page header"
     if new_existing_title == new_draft_title:
         return False, None, "Existing page already uses the same case-number title as the draft"
 
@@ -506,8 +616,14 @@ def _resolve_header_page_conflict(
             title=original_title,
             noauthor=existing_court,
             entry_titles=[new_existing_title, new_draft_title],
-            year=existing_year,
             header_type=existing_header_type,
+        ) if existing_court == draft_court else build_grouped_versions_page_content(
+            title=original_title,
+            header_type=existing_header_type or draft_header_type,
+            court_entries={
+                existing_court: [new_existing_title],
+                draft_court: [new_draft_title],
+            },
         )
         save_page(
             original_title,
@@ -552,7 +668,7 @@ def is_conflict_resolvable(
     if is_versions_page(existing_content):
         existing_noauthor = extract_versions_noauthor(existing_content)
         if existing_noauthor and existing_noauthor != draft_court:
-            return False, "Court mismatch with disambiguation page"
+            return True, "Existing page is a {{裁判文书消歧义页}} page from a different court"
         return True, "Existing page is a {{裁判文书消歧义页}} page"
 
     # Check if existing page is a header page from same court
@@ -561,7 +677,7 @@ def is_conflict_resolvable(
         if not existing_court:
             return False, "Could not extract existing court info"
         if existing_court != draft_court:
-            return False, "Court mismatch: different courts"
+            return True, "Existing page is a {{Header/裁判文书}} page from a different court"
         return True, "Existing page is a {{Header/裁判文书}} page from same court"
 
     return False, "Existing page is neither {{裁判文书消歧义页}} nor {{Header/裁判文书}}"

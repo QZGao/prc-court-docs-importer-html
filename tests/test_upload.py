@@ -45,7 +45,6 @@ def make_versions_page(title: str, court: str, entry_title: str) -> str:
          | title      = {title}
          | court      = {court}
          | type       = 民事判决书
-         | year       = 2024
         }}}}
         * [[{entry_title}]]
         """
@@ -352,7 +351,7 @@ def test_try_resolve_conflict_accepts_legacy_versions_page(monkeypatch):
     assert "{{versions" not in saves[0][1]
     assert "| court      = 北京市第一中级人民法院" in saves[0][1]
     assert "| type       = 民事判决书" in saves[0][1]
-    assert "| year       = 2024" in saves[0][1]
+    assert "| year" not in saves[0][1]
     assert f"* [[{existing_case_title}]]" in saves[0][1]
     assert f"* [[{draft_case_title}]]" in saves[0][1]
     assert "[[Category:" not in saves[0][1]
@@ -397,6 +396,103 @@ def test_try_resolve_conflict_converts_legacy_versions_page_even_when_entry_exis
     assert f"* [[{case_title}]]" in saves[0][1]
     assert "[[Category:" not in saves[0][1]
     assert saves[0][2] == "转换为裁判文书消歧义页"
+
+
+def test_versions_entries_sort_by_case_number_syntax():
+    entries = [
+        "杭州市钱塘区人民法院（2024）浙0114民初10123号民事判决书",
+        "杭州市钱塘区人民法院（2024）浙0114民初2106号民事判决书",
+        "杭州市钱塘区人民法院（2024）浙0114民初2106号之一民事判决书",
+        "杭州市钱塘区人民法院（2024）浙0114民初9号民事判决书",
+    ]
+
+    assert conflict_resolution.sort_versions_entries(entries) == [
+        "杭州市钱塘区人民法院（2024）浙0114民初9号民事判决书",
+        "杭州市钱塘区人民法院（2024）浙0114民初2106号之一民事判决书",
+        "杭州市钱塘区人民法院（2024）浙0114民初2106号民事判决书",
+        "杭州市钱塘区人民法院（2024）浙0114民初10123号民事判决书",
+    ]
+
+
+def test_try_resolve_conflict_removes_year_from_current_versions_page(monkeypatch):
+    original_title = "共享标题"
+    court = "北京市第一中级人民法院"
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    draft_content = make_header_page(
+        title=original_title,
+        court=court,
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = dedent(
+        f"""\
+        {{{{裁判文书消歧义页
+         | title      = {original_title}
+         | court      = {court}
+         | type       = 民事判决书
+         | year       = 2024
+        }}}}
+        * [[{case_title}]]
+        """
+    )
+    saves = []
+
+    monkeypatch.setattr(conflict_resolution, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is True
+    assert new_title == case_title
+    assert error is None
+    assert len(saves) == 1
+    assert "| year" not in saves[0][1]
+
+
+def test_try_resolve_conflict_groups_versions_page_by_court_on_mismatch(monkeypatch):
+    original_title = "共享标题"
+    existing_court = "甲法院"
+    draft_court = "乙法院"
+    existing_case_title = "甲法院（2024）甲01民初2106号民事判决书"
+    draft_case_title = "乙法院（2024）乙01民初10123号民事判决书"
+    draft_content = make_header_page(
+        title=original_title,
+        court=draft_court,
+        doc_type="民事判决书",
+        case_number="（2024）乙01民初10123号",
+    )
+    existing_content = make_versions_page(
+        title=original_title,
+        court=existing_court,
+        entry_title=existing_case_title,
+    )
+    saves = []
+
+    monkeypatch.setattr(conflict_resolution, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is True
+    assert new_title == draft_case_title
+    assert error is None
+    assert len(saves) == 1
+    grouped = saves[0][1]
+    assert "| court" not in grouped
+    assert "| year" not in grouped
+    assert "| type       = 民事判决书" in grouped
+    assert "==甲法院==" in grouped
+    assert "[[Category:甲法院]]" in grouped
+    assert f"* [[{existing_case_title}]]" in grouped
+    assert "==乙法院==" in grouped
+    assert "[[Category:乙法院]]" in grouped
+    assert f"* [[{draft_case_title}]]" in grouped
 
 
 def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(monkeypatch):
@@ -475,8 +571,69 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
     assert "{{裁判文书消歧义页" in saves[1][1]
     assert "| court      = 北京市第一中级人民法院" in saves[1][1]
     assert "| type       = 民事判决书" in saves[1][1]
-    assert "| year       = 2024" in saves[1][1]
+    assert "| year" not in saves[1][1]
     assert "[[Category:" not in saves[1][1]
+
+
+def test_try_resolve_conflict_creates_grouped_versions_page_for_different_courts(monkeypatch):
+    original_title = "共享标题"
+    existing_court = "甲法院"
+    draft_court = "乙法院"
+    existing_case_title = "甲法院（2024）甲01民初2106号民事判决书"
+    draft_case_title = "乙法院（2024）乙01民初10123号民事判决书"
+    existing_content = make_header_page(
+        title=original_title,
+        court=existing_court,
+        doc_type="民事判决书",
+        case_number="（2024）甲01民初2106号",
+    )
+    draft_content = make_header_page(
+        title=original_title,
+        court=draft_court,
+        doc_type="民事判决书",
+        case_number="（2024）乙01民初10123号",
+    )
+    pages = {}
+    saves = []
+    moves = []
+
+    monkeypatch.setattr(
+        conflict_resolution,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(
+        conflict_resolution,
+        "move_page",
+        lambda *args, **kwargs: moves.append((args, kwargs)) or pages.setdefault(existing_case_title, existing_content) or True,
+    )
+    monkeypatch.setattr(conflict_resolution, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+    monkeypatch.setattr(
+        conflict_resolution,
+        "get_page_content",
+        lambda requested_title: (requested_title in pages, pages.get(requested_title)),
+    )
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is True
+    assert new_title == draft_case_title
+    assert error is None
+    assert moves
+    assert saves[-1][0] == original_title
+    grouped = saves[-1][1]
+    assert "| court" not in grouped
+    assert "| year" not in grouped
+    assert "==甲法院==" in grouped
+    assert "[[Category:甲法院]]" in grouped
+    assert f"* [[{existing_case_title}]]" in grouped
+    assert "==乙法院==" in grouped
+    assert "[[Category:乙法院]]" in grouped
+    assert f"* [[{draft_case_title}]]" in grouped
 
 
 def test_process_upload_batch_prefetches_page_queries(tmp_path, monkeypatch):
