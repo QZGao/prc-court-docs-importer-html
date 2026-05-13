@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import html
+import importlib
 import json
 import logging
 import re
 import tempfile
 import time
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -29,7 +30,6 @@ load_dotenv()
 
 from upload.mediawiki import configure_throttle, get_page_content, save_page
 from upload.page_metadata import build_case_title_from_content, parse_header_metadata
-from upload.uploader import upload_document
 
 
 logging.getLogger("pywiki").setLevel(logging.WARNING)
@@ -841,7 +841,7 @@ def auto_fetch_existing_page_into_editor(record: dict[str, Any], prefix: str) ->
     append_log("auto_fetch_existing", record, title=title)
 
 
-def remove_current_record() -> None:
+def remove_current_record(*, clear_result: bool = True) -> None:
     records = st.session_state.records
     index = st.session_state.current_index
     if not records:
@@ -849,7 +849,8 @@ def remove_current_record() -> None:
     records.pop(index)
     if index >= len(records):
         st.session_state.current_index = max(len(records) - 1, 0)
-    st.session_state.last_result = None
+    if clear_result:
+        st.session_state.last_result = None
 
 
 def move_current_record_to_end(updated_record: dict[str, Any]) -> None:
@@ -872,6 +873,31 @@ def apply_editor_values_to_record(record: dict[str, Any], prefix: str, *, target
     return updated
 
 
+def fresh_upload_document():
+    import upload.conflict_resolution as conflict_resolution_module
+    import upload.uploader as uploader_module
+
+    importlib.reload(conflict_resolution_module)
+    uploader_module = importlib.reload(uploader_module)
+    return uploader_module.upload_document
+
+
+def upload_result_to_dict(result: Any) -> dict[str, Any]:
+    if is_dataclass(result):
+        return asdict(result)
+    return {
+        "title": getattr(result, "title", ""),
+        "wenshu_id": getattr(result, "wenshu_id", ""),
+        "status": getattr(result, "status", ""),
+        "final_title": getattr(result, "final_title", None),
+        "case_title": getattr(result, "case_title", None),
+        "redirect_status": getattr(result, "redirect_status", None),
+        "message": getattr(result, "message", ""),
+        "timestamp": getattr(result, "timestamp", ""),
+        "wikitext": getattr(result, "wikitext", None),
+    }
+
+
 def submit_draft_upload(
     record: dict[str, Any],
     prefix: str,
@@ -890,12 +916,20 @@ def submit_draft_upload(
         st.error("Both title and wikitext are required before retrying.")
         return
 
+    append_log(
+        "retry_start",
+        updated,
+        title=title,
+        case_title=updated.get("case_title"),
+        force_overwrite=force_overwrite,
+    )
+
     try:
         configure_throttle(
             interval=float(st.session_state.get("edit_interval", 3.0)),
             maxlag=int(st.session_state.get("maxlag", 5)),
         )
-        result = upload_document(
+        result = fresh_upload_document()(
             title=title,
             wenshu_id=str(wenshu_id),
             wikitext=wikitext,
@@ -908,33 +942,33 @@ def submit_draft_upload(
         queue_switch_to_draft_editor(record, prefix, wikitext)
         st.rerun()
 
-    result_dict = asdict(result)
-    st.session_state.last_result = result_dict
+    result_dict = upload_result_to_dict(result)
     append_log(
         "retry_upload",
         updated,
-        title=result.title,
-        final_title=result.final_title,
-        case_title=result.case_title,
-        status=result.status,
-        result_message=result.message,
+        title=result_dict.get("title") or title,
+        final_title=result_dict.get("final_title"),
+        case_title=result_dict.get("case_title"),
+        status=result_dict.get("status"),
+        result_message=result_dict.get("message"),
+        redirect_status=result_dict.get("redirect_status"),
         force_overwrite=force_overwrite,
     )
+    st.session_state.last_result = result_dict
 
-    if result.status in {"uploaded", "conflict_resolved", "skipped"}:
-        remove_current_record()
-        st.success(f"{result.status}: {result.message}")
+    if result_dict.get("status") in {"uploaded", "conflict_resolved", "skipped"}:
+        remove_current_record(clear_result=False)
         st.rerun()
 
     records = st.session_state.records
     if records:
         records[st.session_state.current_index] = {
             **updated,
-            "status": result.status,
-            "message": result.message,
-            "final_title": result.final_title,
-            "case_title": result.case_title or updated.get("case_title"),
-            "redirect_status": result.redirect_status,
+            "status": result_dict.get("status"),
+            "message": result_dict.get("message"),
+            "final_title": result_dict.get("final_title"),
+            "case_title": result_dict.get("case_title") or updated.get("case_title"),
+            "redirect_status": result_dict.get("redirect_status"),
         }
     queue_switch_to_draft_editor(records[st.session_state.current_index] if records else updated, prefix, wikitext)
     st.rerun()

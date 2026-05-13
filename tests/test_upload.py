@@ -284,6 +284,57 @@ def test_upload_document_skips_after_versions_resolution_when_case_page_exists(m
     assert resolve_calls["count"] == 1
 
 
+def test_upload_document_resolves_versions_page_from_different_court(monkeypatch):
+    title = "共享标题"
+    existing_court = "甲法院"
+    draft_court = "乙法院"
+    existing_case_title = "甲法院（2024）甲01民初2106号民事判决书"
+    draft_case_title = "乙法院（2024）乙01民初10123号民事判决书"
+    draft_wikitext = make_header_page(
+        title=title,
+        court=draft_court,
+        doc_type="民事判决书",
+        case_number="（2024）乙01民初10123号",
+    )
+    existing_content = make_versions_page(title=title, court=existing_court, entry_title=existing_case_title)
+    disambiguation_saves = []
+    draft_saves = []
+
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(
+        conflict_resolution,
+        "save_page",
+        lambda *args, **kwargs: disambiguation_saves.append(args) or True,
+    )
+    monkeypatch.setattr(
+        uploader,
+        "save_page",
+        lambda *args, **kwargs: draft_saves.append(args) or True,
+    )
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=draft_wikitext)
+
+    assert result.status == "conflict_resolved"
+    assert result.final_title == draft_case_title
+    assert result.case_title == draft_case_title
+    assert result.redirect_status == "not_needed"
+    assert "different court" in result.message
+    assert len(disambiguation_saves) == 1
+    grouped = disambiguation_saves[0][1]
+    assert "| court" not in grouped
+    assert "==甲法院==" in grouped
+    assert f"* [[{existing_case_title}]]" in grouped
+    assert "==乙法院==" in grouped
+    assert f"* [[{draft_case_title}]]" in grouped
+    assert [save[0] for save in draft_saves] == [draft_case_title]
+
+
 def test_try_resolve_conflict_skips_unchanged_versions_page_save(monkeypatch):
     original_title = "共享标题"
     court = "北京市第一中级人民法院"
