@@ -208,16 +208,39 @@ def get_component_func():
 <html>
 <head>
   <meta charset="utf-8" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/eclipse.min.css" />
   <style>
     html, body { margin: 0; padding: 0; background: #fff; font-family: sans-serif; }
-    .CodeMirror {
+    #editor { display: none; }
+    .cm-editor {
       border: 1px solid #d0d7de;
       border-radius: 6px;
       font-family: Consolas, "SFMono-Regular", Menlo, monospace;
       font-size: 13px;
       line-height: 1.45;
+      outline: none;
+    }
+    .cm-editor.cm-focused {
+      border-color: #7aa7e9;
+      box-shadow: 0 0 0 1px #7aa7e9;
+    }
+    .cm-scroller,
+    .cm-content,
+    .cm-gutters {
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .cm-scroller {
+      overflow: auto;
+    }
+    .cm-gutters {
+      background: #f6f8fa;
+      border-right: 1px solid #d0d7de;
+      color: #6e7781;
+    }
+    .cm-activeLine,
+    .cm-activeLineGutter {
+      background: #f6f8fa;
     }
     textarea.fallback {
       width: calc(100% - 12px);
@@ -233,16 +256,48 @@ def get_component_func():
 </head>
 <body>
   <textarea id="editor"></textarea>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/xml/xml.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/htmlmixed/htmlmixed.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/mediawiki/mediawiki.min.js"></script>
-  <script>
+  <script type="module">
+    const CODEMIRROR_MEDIAWIKI_URL = "https://cdn.jsdelivr.net/npm/@bhsd/codemirror-mediawiki@3.17.1/dist/main.min.js";
+    const CODEMIRROR_UTIL_URL = "https://cdn.jsdelivr.net/npm/@bhsd/cm-util@1.1.0/+esm";
+    const SITEINFO_URL = "https://zh.wikisource.org/w/api.php?action=query&meta=siteinfo&siprop=general|magicwords|extensiontags|functionhooks|variables|namespaces|namespacealiases&formatversion=2&format=json&origin=*";
+    const ARTICLE_PATH = "https://zh.wikisource.org/wiki/";
+    const MEDIAWIKI_URL_PROTOCOLS = "bitcoin:|ftp://|ftps://|geo:|git://|gopher://|http://|https://|irc://|ircs://|magnet:|mailto:|matrix:|mms://|news:|nntp://|redis://|sftp://|sip:|sips:|sms:|ssh://|svn://|tel:|telnet://|urn:|wikipedia://|worldwind://|xmpp:|//";
+    const TAG_MODES = {
+      onlyinclude: "mediawiki",
+      includeonly: "mediawiki",
+      noinclude: "mediawiki",
+      translate: "mediawiki",
+      tvar: "mediawiki",
+      pre: "text/pre",
+      nowiki: "text/nowiki",
+      indicator: "mediawiki",
+      poem: "mediawiki",
+      ref: "mediawiki",
+      references: "text/references",
+      gallery: "text/gallery",
+      choose: "text/choose",
+      option: "mediawiki",
+      combobox: "text/combobox",
+      combooption: "mediawiki",
+      inputbox: "text/inputbox",
+      templatedata: "json",
+      maplink: "jsonc",
+      mapframe: "jsonc",
+      math: "text/math",
+      chem: "text/math",
+      ce: "text/math",
+      score: "lilypond"
+    };
+
     let editor = null;
     let fallback = null;
     let timer = null;
     let debounceTimer = null;
     let lastSentValue = null;
+    let editorInitPromise = null;
+    let mediaWikiModulePromise = null;
+    let mediaWikiConfigPromise = null;
+    let mediaWikiUtilPromise = null;
 
     function send(type, data) {
       window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, data || {}), "*");
@@ -257,52 +312,198 @@ def get_component_func():
       send("streamlit:setComponentValue", {value: value});
     }
 
-    function initEditor(args) {
+    function getCurrentValue() {
+      if (editor && editor.view) {
+        return editor.view.state.doc.toString();
+      }
+      if (fallback) {
+        return fallback.value;
+      }
+      return "";
+    }
+
+    async function loadMediaWikiModule() {
+      if (!mediaWikiModulePromise) {
+        mediaWikiModulePromise = import(CODEMIRROR_MEDIAWIKI_URL).then(function(mod) {
+          mod.registerMediaWiki(ARTICLE_PATH);
+          if (mod.registerBracketMatchingForMediaWiki) {
+            mod.registerBracketMatchingForMediaWiki();
+          }
+          if (mod.registerCodeFoldingForMediaWiki) {
+            mod.registerCodeFoldingForMediaWiki();
+          }
+          if (mod.registerCloseTagsForMediaWiki) {
+            mod.registerCloseTagsForMediaWiki();
+          }
+          return mod;
+        });
+      }
+      return mediaWikiModulePromise;
+    }
+
+    async function loadMediaWikiUtil() {
+      if (!mediaWikiUtilPromise) {
+        mediaWikiUtilPromise = import(CODEMIRROR_UTIL_URL);
+      }
+      return mediaWikiUtilPromise;
+    }
+
+    function normalizeNamespaceName(name) {
+      return String(name || "").replace(/_/g, " ").trim().toLowerCase();
+    }
+
+    function buildNamespaceIds(namespaces, namespaceAliases) {
+      const nsid = {};
+      Object.values(namespaces || {}).forEach(function(ns) {
+        const id = Number(ns.id);
+        [ns.name, ns.canonical].forEach(function(name) {
+          const normalized = normalizeNamespaceName(name);
+          if (normalized || id === 0) {
+            nsid[normalized] = id;
+          }
+        });
+      });
+      (namespaceAliases || []).forEach(function(alias) {
+        nsid[normalizeNamespaceName(alias.alias)] = Number(alias.id);
+      });
+      return nsid;
+    }
+
+    function extensionTagName(tag) {
+      return String(tag || "").replace(/^<\/?|>$/g, "").toLowerCase();
+    }
+
+    function getConfigPair(util, magicwords, rule) {
+      return [true, false].map(function(caseSensitive) {
+        return util.getConfig(magicwords, rule, caseSensitive);
+      });
+    }
+
+    async function loadMediaWikiConfig() {
+      if (!mediaWikiConfigPromise) {
+        mediaWikiConfigPromise = Promise.all([
+          loadMediaWikiUtil(),
+          fetch(SITEINFO_URL).then(function(response) {
+            if (!response.ok) {
+              throw new Error("Failed to load zh.wikisource siteinfo: HTTP " + response.status);
+            }
+            return response.json();
+          })
+        ]).then(function(values) {
+          const util = values[0];
+          const query = values[1].query || {};
+          const magicwords = query.magicwords || [];
+          const variables = query.variables || [];
+          const functionHooks = (query.functionhooks || []).map(function(name) {
+            return String(name).toLowerCase();
+          });
+          const otherFunctions = util.otherParserFunctions || new Set(["msgnw"]);
+          const functionNames = new Set([
+            ...functionHooks,
+            ...variables.map(function(name) {
+              return String(name).toLowerCase();
+            }),
+            ...Array.from(otherFunctions)
+          ]);
+          const functionSynonyms = getConfigPair(util, magicwords, function(word) {
+            return functionNames.has(String(word.name).toLowerCase());
+          });
+          util.cleanAliases(functionSynonyms[1]);
+
+          const extensionTags = (query.extensiontags || [])
+            .map(extensionTagName)
+            .filter(Boolean);
+          const keywords = util.getKeywords(magicwords, true);
+          const normalizedFunctionHooks = functionHooks.includes("msgnw")
+            ? functionHooks
+            : [...functionHooks, "msgnw"];
+
+          return {
+            tags: Object.fromEntries(extensionTags.map(function(tag) {
+              return [tag, true];
+            })),
+            tagModes: TAG_MODES,
+            doubleUnderscore: getConfigPair(util, magicwords, function(word) {
+              return word.aliases.some(function(alias) {
+                return /^__.+__$/u.test(alias);
+              });
+            }),
+            functionHooks: normalizedFunctionHooks,
+            variableIDs: variables,
+            functionSynonyms: functionSynonyms,
+            urlProtocols: MEDIAWIKI_URL_PROTOCOLS,
+            nsid: buildNamespaceIds(query.namespaces, query.namespacealiases),
+            img: keywords.img,
+            redirection: keywords.redirection,
+            variants: query.general && query.general.langconversion
+              ? util.getVariants(query.general.variants)
+              : [],
+            articlePath: ARTICLE_PATH
+          };
+        });
+      }
+      return mediaWikiConfigPromise;
+    }
+
+    function initFallback(args, reason) {
       const textarea = document.getElementById("editor");
       const height = Number(args.height || 640);
       const value = args.value || "";
       const debounceMs = Number(args.debounce_ms || 1200);
 
-      if (window.CodeMirror) {
-        editor = CodeMirror.fromTextArea(textarea, {
-          value: value,
-          mode: args.mode || "mediawiki",
-          theme: args.theme || "eclipse",
-          lineNumbers: true,
-          lineWrapping: true,
-          indentUnit: 2,
-          tabSize: 2,
-          viewportMargin: 50
-        });
-        editor.setSize("100%", height + "px");
-        editor.setValue(value);
-        editor.on("change", function(cm) {
-          const current = cm.getValue();
-          clearTimeout(debounceTimer);
-          debounceTimer = setTimeout(function() {
-            setValue(current);
-          }, debounceMs);
-        });
-      } else {
-        fallback = textarea;
-        fallback.className = "fallback";
-        fallback.style.height = height + "px";
-        fallback.value = value;
-        fallback.addEventListener("input", function() {
-          clearTimeout(debounceTimer);
-          debounceTimer = setTimeout(function() {
-            setValue(fallback.value);
-          }, debounceMs);
-        });
+      if (reason) {
+        console.error(reason);
       }
+      fallback = textarea;
+      fallback.className = "fallback";
+      fallback.style.display = "block";
+      fallback.style.height = height + "px";
+      fallback.value = value;
+      fallback.addEventListener("input", function() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(function() {
+          setValue(fallback.value);
+        }, debounceMs);
+      });
 
       setHeight(height + 8);
     }
 
+    async function initEditor(args) {
+      const textarea = document.getElementById("editor");
+      const height = Number(args.height || 640);
+      const value = args.value || "";
+      const debounceMs = Number(args.debounce_ms || 1200);
+
+      textarea.value = value;
+
+      try {
+        const mod = await loadMediaWikiModule();
+        const mwConfig = await loadMediaWikiConfig();
+        editor = new mod.CodeMirror6(textarea, "mediawiki", mwConfig);
+        editor.setIndent(2);
+        editor.setLineWrapping(true);
+        editor.setContent(value, true);
+        if (editor.view) {
+          editor.view.dom.style.height = height + "px";
+        }
+
+        textarea.addEventListener("input", function() {
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(function() {
+            setValue(getCurrentValue());
+          }, debounceMs);
+        });
+        setHeight(height + 8);
+      } catch (error) {
+        initFallback(args, error && (error.stack || error.message || String(error)));
+      }
+    }
+
     function updateEditor(args) {
       const nextValue = args.value || "";
-      if (editor && editor.getValue() !== nextValue && lastSentValue !== nextValue) {
-        editor.setValue(nextValue);
+      if (editor && editor.view && getCurrentValue() !== nextValue && lastSentValue !== nextValue) {
+        editor.setContent(nextValue, true);
       } else if (fallback && fallback.value !== nextValue && lastSentValue !== nextValue) {
         fallback.value = nextValue;
       }
@@ -330,7 +531,13 @@ def get_component_func():
         return;
       }
       if (!editor && !fallback) {
-        initEditor(args);
+        if (!editorInitPromise) {
+          editorInitPromise = initEditor(args);
+        } else {
+          editorInitPromise.then(function() {
+            updateEditor(args);
+          });
+        }
       } else {
         updateEditor(args);
       }
