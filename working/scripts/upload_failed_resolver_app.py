@@ -294,6 +294,8 @@ def get_component_func():
     let timer = null;
     let debounceTimer = null;
     let lastSentValue = null;
+    let pendingSentValue = null;
+    let suppressInputValue = null;
     let editorInitPromise = null;
     let mediaWikiModulePromise = null;
     let mediaWikiConfigPromise = null;
@@ -309,6 +311,7 @@ def get_component_func():
 
     function setValue(value) {
       lastSentValue = value;
+      pendingSentValue = value;
       send("streamlit:setComponentValue", {value: value});
     }
 
@@ -460,6 +463,9 @@ def get_component_func():
       fallback.style.height = height + "px";
       fallback.value = value;
       fallback.addEventListener("input", function() {
+        if (suppressInputValue !== null && fallback.value === suppressInputValue) {
+          return;
+        }
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(function() {
           setValue(fallback.value);
@@ -489,9 +495,13 @@ def get_component_func():
         }
 
         textarea.addEventListener("input", function() {
+          const current = getCurrentValue();
+          if (suppressInputValue !== null && current === suppressInputValue) {
+            return;
+          }
           clearTimeout(debounceTimer);
           debounceTimer = setTimeout(function() {
-            setValue(getCurrentValue());
+            setValue(current);
           }, debounceMs);
         });
         setHeight(height + 8);
@@ -500,12 +510,37 @@ def get_component_func():
       }
     }
 
+    function clearSuppressedInput(value) {
+      window.setTimeout(function() {
+        if (suppressInputValue === value) {
+          suppressInputValue = null;
+        }
+      }, 900);
+    }
+
+    function applyExternalValue(nextValue) {
+      suppressInputValue = nextValue;
+      if (editor && editor.view && getCurrentValue() !== nextValue) {
+        editor.setContent(nextValue, true);
+        clearSuppressedInput(nextValue);
+      } else if (fallback && fallback.value !== nextValue) {
+        fallback.value = nextValue;
+        clearSuppressedInput(nextValue);
+      }
+    }
+
     function updateEditor(args) {
       const nextValue = args.value || "";
-      if (editor && editor.view && getCurrentValue() !== nextValue && lastSentValue !== nextValue) {
-        editor.setContent(nextValue, true);
-      } else if (fallback && fallback.value !== nextValue && lastSentValue !== nextValue) {
-        fallback.value = nextValue;
+      if (pendingSentValue !== null) {
+        if (nextValue === pendingSentValue) {
+          pendingSentValue = null;
+        } else {
+          return;
+        }
+      }
+
+      if (getCurrentValue() !== nextValue && lastSentValue !== nextValue) {
+        applyExternalValue(nextValue);
       }
     }
 
