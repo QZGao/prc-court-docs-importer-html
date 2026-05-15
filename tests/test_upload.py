@@ -728,7 +728,7 @@ def test_try_resolve_conflict_replaces_redirect_target_with_existing_document(mo
         (
             original_title,
             existing_case_title,
-            f"移动至具体案号页面，原标题改为消歧义页：[[{original_title}]]",
+            f"移动至具体案号页面，原标题改为消歧义页",
             True,
             True,
         )

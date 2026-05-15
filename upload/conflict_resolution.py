@@ -549,7 +549,7 @@ def _resolve_header_page_conflict(
             move_page(
                 original_title,
                 new_existing_title,
-                reason=f"移动至具体案号页面，原标题改为消歧义页：[[{original_title}]]",
+                reason=f"移动至具体案号页面，原标题改为消歧义页",
                 leave_redirect=True,
             )
             log(f"Moved [[{original_title}]] → [[{new_existing_title}]]", True)
@@ -558,7 +558,7 @@ def _resolve_header_page_conflict(
                 move_page(
                     original_title,
                     new_existing_title,
-                    reason=f"移动至具体案号页面，原标题改为消歧义页：[[{original_title}]]",
+                    reason=f"移动至具体案号页面，原标题改为消歧义页",
                     leave_redirect=True,
                     ignore_warnings=True,
                 )
