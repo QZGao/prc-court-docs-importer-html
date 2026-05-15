@@ -226,6 +226,123 @@ def test_upload_document_skips_identical_content_despite_line_ending_difference(
     assert result.message == "Content identical to existing page"
 
 
+def test_upload_document_hides_overwritable_revision_with_review_category(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    existing_content = "既有页面内容。\n[[Category:旧分类]]\n"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "reverted_overwrite"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert len(saves) == 2
+    assert saves[0][0] == title
+    assert saves[0][1] == wikitext
+    assert saves[0][2] == uploader.build_edit_summary("doc-1")
+    assert saves[1][0] == title
+    assert saves[1][1] == f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+    assert saves[1][2] == uploader.build_manual_revert_summary("doc-1")
+
+
+def test_upload_document_keeps_os_redaction_page_in_overwritable_log(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    existing_content = "既有页面内容。{{PRC-redact|12|os=yes}}\n"
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(
+        uploader,
+        "save_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("save_page should not be called")),
+    )
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "overwritable"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert result.wikitext == wikitext
+    assert "{{PRC-redact|N|os=yes}}" in result.message
+
+
+def test_upload_document_hides_existing_case_specific_target_after_resolution(monkeypatch):
+    title = "共享标题"
+    court = "北京市第一中级人民法院"
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court=court,
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    versions_content = make_versions_page(title=title, court=court, entry_title="已有条目")
+    existing_case_content = "既有案号页占位内容。\n"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(
+            requested_title=requested_title,
+            exists=True,
+            resolved_title=requested_title,
+            content=existing_case_content,
+        ),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, versions_content))
+    monkeypatch.setattr(
+        uploader,
+        "try_resolve_conflict",
+        lambda original_title, draft_content, existing_content: (True, case_title, None),
+    )
+    monkeypatch.setattr(
+        uploader,
+        "update_draft_for_conflict_resolution",
+        lambda draft_content, original_title: draft_content,
+    )
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "reverted_overwrite"
+    assert result.final_title == case_title
+    assert len(saves) == 2
+    assert saves[0][0] == case_title
+    assert saves[0][1] == wikitext
+    assert saves[1][0] == case_title
+    assert saves[1][1] == f"{existing_case_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+
+
 def test_upload_document_skips_after_versions_resolution_when_case_page_exists(monkeypatch):
     title = "张三与李四民事判决书"
     court = "北京市第一中级人民法院"

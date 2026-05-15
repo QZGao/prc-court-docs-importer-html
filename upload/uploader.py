@@ -7,6 +7,7 @@ Rate limiting is handled by pywikibot's built-in throttle.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,13 @@ from .page_metadata import (
 
 console = Console()
 DEFAULT_UPLOAD_QUERY_BATCH_SIZE = DEFAULT_READ_BATCH_SIZE
+UNCHECKED_OVERWRITE_CATEGORY = "覆盖版本未检查的裁判文书"
+UNCHECKED_OVERWRITE_CATEGORY_LINE = f"[[Category:{UNCHECKED_OVERWRITE_CATEGORY}]]"
+UNCHECKED_OVERWRITE_CATEGORY_RE = re.compile(
+    rf"\[\[\s*(?:Category|分类|分類)\s*:\s*{re.escape(UNCHECKED_OVERWRITE_CATEGORY)}(?:\|[^\]\n]*)?\]\]",
+    re.IGNORECASE,
+)
+OS_REDACTION_RE = re.compile(r"\{\{PRC-redact\|\d+\|os=yes\}\}")
 
 
 def utc_now_iso() -> str:
@@ -52,7 +60,7 @@ class UploadResult:
     """Result of uploading a single document."""
     title: str
     wenshu_id: str
-    status: str  # 'uploaded', 'skipped', 'conflict_resolved', 'failed', 'overwritable'
+    status: str  # 'uploaded', 'skipped', 'conflict_resolved', 'failed', 'overwritable', 'reverted_overwrite'
     final_title: Optional[str] = None  # Different from title if conflict resolved
     case_title: Optional[str] = None
     redirect_status: Optional[str] = None
@@ -65,6 +73,24 @@ def build_edit_summary(wenshu_id: str) -> str:
     """Build a standardized edit summary."""
     # return f"Imported from 裁判文书网 (credit: caseopen.org), source: https://wenshu.court.gov.cn/website/wenshu/181107ANFZ0BXSK4/index.html?docId={wenshu_id}"
     return "Imported from 裁判文书网 (credit: caseopen.org)"
+
+
+def build_manual_revert_summary(wenshu_id: str) -> str:
+    """Build the edit summary for restoring pre-existing content after a hidden overwrite."""
+    return "回退覆盖导入版本并标记待检查"
+
+
+def _contains_os_redaction(content: str) -> bool:
+    """Return whether the existing page has an os=yes redaction template."""
+    return bool(OS_REDACTION_RE.search(content or ""))
+
+
+def _add_unchecked_overwrite_category(content: str) -> str:
+    """Append the unchecked-overwrite review category to existing content."""
+    if UNCHECKED_OVERWRITE_CATEGORY_RE.search(content or ""):
+        return content
+
+    return f"{(content or '').rstrip()}\n{UNCHECKED_OVERWRITE_CATEGORY_LINE}\n"
 
 
 def _append_message(message: str, extra: str) -> str:
@@ -172,6 +198,109 @@ def _attach_case_redirect(
         )
 
     return result
+
+
+def _build_overwritable_result(
+    *,
+    source_title: str,
+    target_title: str,
+    wenshu_id: str,
+    wikitext: str,
+    case_title: Optional[str],
+    message: str,
+    timestamp: str,
+) -> UploadResult:
+    """Build an overwritable-log result retaining the import wikitext."""
+    return UploadResult(
+        title=source_title,
+        wenshu_id=wenshu_id,
+        status='overwritable',
+        final_title=target_title,
+        case_title=case_title,
+        message=message,
+        timestamp=timestamp,
+        wikitext=wikitext,
+    )
+
+
+def _hide_overwrite_revision_for_review(
+    *,
+    source_title: str,
+    target_title: str,
+    wenshu_id: str,
+    import_wikitext: str,
+    existing_content: Optional[str],
+    case_title: Optional[str],
+    message: str,
+    timestamp: str,
+) -> UploadResult:
+    """
+    Save the import once, then restore existing content with a review category.
+
+    This keeps the imported revision in page history for maintainers while
+    leaving the live page on the pre-existing content.
+    """
+    if existing_content is None:
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='failed',
+            final_title=target_title,
+            case_title=case_title,
+            message="Page exists but content could not be fetched for review revert",
+            timestamp=timestamp,
+        )
+
+    if _contains_os_redaction(existing_content):
+        return _build_overwritable_result(
+            source_title=source_title,
+            target_title=target_title,
+            wenshu_id=wenshu_id,
+            wikitext=import_wikitext,
+            case_title=case_title,
+            message=_append_message(message, "Existing page contains {{PRC-redact|N|os=yes}}"),
+            timestamp=timestamp,
+        )
+
+    try:
+        save_page(target_title, import_wikitext, build_edit_summary(wenshu_id))
+    except Exception as e:
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='failed',
+            final_title=target_title,
+            case_title=case_title,
+            message=f"Failed to save overwrite revision for review: {e}",
+            timestamp=timestamp,
+        )
+
+    try:
+        save_page(
+            target_title,
+            _add_unchecked_overwrite_category(existing_content),
+            build_manual_revert_summary(wenshu_id),
+        )
+    except Exception as e:
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='failed',
+            final_title=target_title,
+            case_title=case_title,
+            message=f"Failed to revert overwrite revision for review: {e}",
+            timestamp=timestamp,
+        )
+
+    return UploadResult(
+        title=source_title,
+        wenshu_id=wenshu_id,
+        status='reverted_overwrite',
+        final_title=target_title,
+        case_title=case_title,
+        message=_append_message(message, "Saved overwrite revision and restored original content with review category"),
+        timestamp=timestamp,
+    )
 
 
 def upload_document(
@@ -321,15 +450,19 @@ def upload_document(
                                         )
 
                                     # Case-specific page exists but does not land on a real document page.
-                                    return UploadResult(
-                                        title=title,
+                                    target_existing_content = new_page.content
+                                    if new_page.is_redirect or target_existing_content is None:
+                                        _, target_existing_content = get_page_content(new_title)
+
+                                    return _hide_overwrite_revision_for_review(
+                                        source_title=title,
+                                        target_title=new_title,
                                         wenshu_id=wenshu_id,
-                                        status='overwritable',
-                                        final_title=new_title,
+                                        import_wikitext=updated_wikitext,
+                                        existing_content=target_existing_content,
                                         case_title=case_title or new_title,
                                         message=f"Case-specific page already exists: {new_title}",
                                         timestamp=timestamp,
-                                        wikitext=updated_wikitext,
                                     )
                             except Exception as e:
                                 return UploadResult(
@@ -390,16 +523,16 @@ def upload_document(
                                 message=f"Case-number page already exists: {case_page.resolved_title}",
                                 timestamp=timestamp,
                             )
-                        # Not resolvable - mark as overwritable for manual review
-                        return UploadResult(
-                            title=title,
+                        # Not resolvable - store the overwrite as a hidden revision for manual review.
+                        return _hide_overwrite_revision_for_review(
+                            source_title=title,
+                            target_title=title,
                             wenshu_id=wenshu_id,
-                            status='overwritable',
-                            final_title=title,
+                            import_wikitext=wikitext,
+                            existing_content=existing_content,
                             case_title=case_title,
                             message=f"Page exists, conflict not resolvable: {scenario}",
                             timestamp=timestamp,
-                            wikitext=wikitext,
                         )
                 return UploadResult(
                     title=title,
@@ -540,7 +673,7 @@ def _process_prefetched_upload_batch(
 
         result_dict = asdict(result)
 
-        if result.status == 'uploaded':
+        if result.status in {'uploaded', 'reverted_overwrite'}:
             uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
             uploaded_count += 1
         elif result.status == 'conflict_resolved':
@@ -556,7 +689,7 @@ def _process_prefetched_upload_batch(
             failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
             failed_count += 1
 
-        if result.status in {'uploaded', 'conflict_resolved'} or result.redirect_status in {'created', 'updated'}:
+        if result.status in {'uploaded', 'conflict_resolved', 'reverted_overwrite'} or result.redirect_status in {'created', 'updated'}:
             for touched_title in (
                 doc["title"],
                 result.final_title,

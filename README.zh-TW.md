@@ -179,8 +179,10 @@ python -m upload converted.jsonl
 # - uploaded_YYYYMMDD_HHMMSS.log        （成功上傳）
 # - upload_failed_YYYYMMDD_HHMMSS.jsonl （失敗上傳）
 # - skipped_YYYYMMDD_HHMMSS.log         （已跳過的頁面）
-# - overwritable_YYYYMMDD_HHMMSS.jsonl  （可手動覆寫的頁面）
+# - overwritable_YYYYMMDD_HHMMSS.jsonl  （保留給手動覆寫的頁面）
 ```
+
+預設情況下，可覆寫衝突會先寫入一次，隨即還原為原始內容並加上`[[Category:覆盖版本未检查的裁判文书]]`，讓匯入版本留在頁面歷史中供檢查。若既有頁面含有 `{{PRC-redact|N|os=yes}}`，則不進行編輯，仍記錄至overwritable JSONL。
 
 #### 限制上傳數量
 

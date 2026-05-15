@@ -179,8 +179,10 @@ python -m upload converted.jsonl
 # - uploaded_YYYYMMDD_HHMMSS.log        (successful uploads)
 # - upload_failed_YYYYMMDD_HHMMSS.jsonl (failed uploads)
 # - skipped_YYYYMMDD_HHMMSS.log         (skipped pages)
-# - overwritable_YYYYMMDD_HHMMSS.jsonl  (pages that can be manually overwritten)
+# - overwritable_YYYYMMDD_HHMMSS.jsonl  (pages left untouched for manual overwrite)
 ```
+
+By default, overwritable conflicts are written once and then immediately restored to the original content plus `[[Category:覆盖版本未检查的裁判文书]]`, leaving the import available in page history for review. Existing pages containing `{{PRC-redact|N|os=yes}}` are left untouched and logged to the overwritable JSONL.
 
 #### Limiting Upload Count
 
