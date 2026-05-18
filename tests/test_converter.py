@@ -34,6 +34,7 @@ from convert.location import (
 from convert.converter import (
     ConversionInterrupted,
     convert_document,
+    extract_date_components_from_s31,
     extract_doc_type_from_s22,
     infer_court_with_province,
     iter_json_objects,
@@ -233,6 +234,16 @@ class TestDateExtraction:
         assert year == "2024"
         assert month == "9"
         assert day == "28"
+
+    def test_extract_s31_date(self):
+        year, month, day = extract_date_components_from_s31("2014-09-30")
+        assert year == "2014"
+        assert month == "9"
+        assert day == "30"
+
+    def test_extract_s31_invalid_date_returns_empty_components(self):
+        assert extract_date_components_from_s31("") == (None, None, None)
+        assert extract_date_components_from_s31("2014/09/30") == (None, None, None)
 
 
 class TestSignatureDetection:
@@ -516,6 +527,60 @@ class TestWikitextRendering:
         assert "|court = 北京市第一中级人民法院" in result.wikitext
         assert "|案号 = （2024）京01执123号" in result.wikitext
         assert "正文内容。" in result.wikitext
+
+    def test_convert_document_uses_metadata_fallbacks_for_header(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-4",
+            "s2": "北京市第一中级人民法院",
+            "s7": "(2024)京01执123号",
+            "s31": "2024-09-30",
+            "s22": "北京市第一中级人民法院\n执行裁定书\n(2024)京01执123号",
+            "qwContent": """
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.court == "北京市第一中级人民法院"
+        assert result.doc_type == "执行裁定书"
+        assert result.doc_id == "（2024）京01执123号"
+        assert "|court = 北京市第一中级人民法院" in result.wikitext
+        assert "|type = 执行裁定书" in result.wikitext
+        assert "|案号 = （2024）京01执123号" in result.wikitext
+        assert "|year = 2024" in result.wikitext
+        assert "|month = 9" in result.wikitext
+        assert "|day = 30" in result.wikitext
+
+    def test_convert_document_prefers_parsed_html_date_over_s31(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-5",
+            "s2": "北京市第一中级人民法院",
+            "s7": "（2024）京01执123号",
+            "s31": "2024-09-30",
+            "s22": "北京市第一中级人民法院\n执行裁定书\n（2024）京01执123号",
+            "qwContent": """
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市第一中级人民法院</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+                <div style='TEXT-ALIGN: right;'>（2024）京01执123号</div>
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert "|year = 2024" in result.wikitext
+        assert "|month = 1" in result.wikitext
+        assert "|day = 1" in result.wikitext
 
 
 class TestTestCasesConversion:

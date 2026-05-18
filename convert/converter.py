@@ -88,6 +88,23 @@ def extract_doc_type_from_s22(s22: str, court: str, doc_id: str) -> str:
     return ""
 
 
+def extract_date_components_from_s31(s31: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Extract year, month, and day from the s31 metadata field.
+
+    s31 is expected to be an ISO-like date string: "yyyy-mm-dd".
+    """
+    if not s31:
+        return None, None, None
+
+    match = re.fullmatch(r'\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*', s31)
+    if not match:
+        return None, None, None
+
+    year, month, day = match.groups()
+    return year, str(int(month)), str(int(day))
+
+
 def infer_court_with_province(s2: str, s22: str) -> str:
     """
     Infer the full court name with province from s2 and s22.
@@ -143,6 +160,7 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
         s22 = normalize_redaction_markers(
             remove_cjk_spaces(remove_unicode_other_chars(raw_json.get('s22', '').strip()))
         )
+        s31 = remove_unicode_other_chars(raw_json.get('s31', '').strip())
         html_content = raw_json.get('qwContent', '')
         
         if not title:
@@ -210,10 +228,40 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
             raw_json=raw_json,
             timestamp=timestamp,
         )
-    
-    # 5. Render wikitext
+
+    # 5. Determine case number and date metadata fallbacks
     try:
-        wikitext = render_wikitext(doc, title, docid=wenshu_id)
+        if doc.doc_id:
+            case_number = re.sub(r'\s+', '', doc.doc_id)
+        else:
+            case_number = doc_id
+
+        fallback_date = extract_date_components_from_s31(s31)
+    except Exception as e:
+        return None, ConversionError(
+            error_stage="block_detect",
+            error_message=f"Failed to determine case/date metadata: {e}",
+            raw_json=raw_json,
+            timestamp=timestamp,
+        )
+
+    # Fill parsed document metadata only when HTML parsing could not find it,
+    # so renderer-level behavior remains driven by parsed HTML where available.
+    if not doc.court_name:
+        doc.court_name = court
+    if not doc.doc_type:
+        doc.doc_type = doc_type
+    if not doc.doc_id:
+        doc.doc_id = case_number
+    
+    # 6. Render wikitext
+    try:
+        wikitext = render_wikitext(
+            doc,
+            title,
+            docid=wenshu_id,
+            date_fallback=fallback_date,
+        )
     except Exception as e:
         return None, ConversionError(
             error_stage="render",
@@ -228,7 +276,7 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
         wenshu_id=wenshu_id,
         court=court,
         doc_type=doc_type,
-        doc_id=doc_id,
+        doc_id=case_number,
         wikitext=wikitext,
     ), None
 

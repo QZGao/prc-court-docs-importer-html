@@ -301,7 +301,12 @@ def render_footer() -> str:
     return "{{PD-PRC-exempt}}\n"
 
 
-def render_wikitext(doc: ParsedDocument, title: str, docid: Optional[str] = None) -> str:
+def render_wikitext(
+    doc: ParsedDocument,
+    title: str,
+    docid: Optional[str] = None,
+    date_fallback: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = None,
+) -> str:
     """
     Render a ParsedDocument as complete wikitext for zhwikisource.
     
@@ -312,10 +317,14 @@ def render_wikitext(doc: ParsedDocument, title: str, docid: Optional[str] = None
     Returns:
         Complete wikitext string ready for upload
     """
-    # Extract date components
-    year, month, day = None, None, None
+    # Extract date components, falling back to metadata when no parseable date
+    # was found in the HTML.
+    year, month, day = date_fallback or (None, None, None)
     if doc.date_block:
-        year, month, day = extract_date_components(doc.date_block.text)
+        parsed_year, parsed_month, parsed_day = extract_date_components(doc.date_block.text)
+        year = parsed_year or year
+        month = parsed_month or month
+        day = parsed_day or day
 
     # Infer location from court name
     location = infer_location_from_court(doc.court_name)
