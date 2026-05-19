@@ -390,6 +390,106 @@ def test_upload_document_hides_overwritable_revision_with_review_category(monkey
     assert saves[1][2] == uploader.build_manual_revert_summary("doc-1")
 
 
+def test_upload_document_keeps_safe_header_param_fill_without_review_category(monkeypatch):
+    title = "张三与李四民事判决书"
+    existing_content = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    assert "|loc = \n" in existing_content
+    wikitext = existing_content.replace("|loc = \n", "|loc = 北京市\n")
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert "without review category" in result.message
+    assert len(saves) == 1
+    assert saves[0][0] == title
+    assert saves[0][1] == wikitext
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+
+
+def test_upload_document_keeps_case_number_bracket_normalization_without_review_category(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = wikitext.replace("（2024）京01民终1号", "(2024)京01民终1号")
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert "without review category" in result.message
+    assert len(saves) == 1
+    assert saves[0][0] == title
+    assert saves[0][1] == wikitext
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+
+
+def test_upload_document_keeps_redaction_marker_normalization_without_review_category(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    ).replace("正文。", "申请人张三{{PRC-redact|3}}。")
+    existing_content = wikitext.replace("{{PRC-redact|3}}", "Xｘ*")
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert "without review category" in result.message
+    assert len(saves) == 1
+    assert saves[0][0] == title
+    assert saves[0][1] == wikitext
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+
+
 def test_upload_document_keeps_os_redaction_page_in_overwritable_log(monkeypatch):
     title = "张三与李四民事判决书"
     wikitext = make_header_page(

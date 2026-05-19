@@ -16,6 +16,8 @@ from typing import Optional, Tuple
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn, SpinnerColumn
 from rich.console import Console
 
+from convert.html_normalizer import normalize_redaction_markers
+
 from .mediawiki import (
     DEFAULT_READ_BATCH_SIZE,
     PageSnapshot,
@@ -36,6 +38,7 @@ from .page_metadata import (
     build_case_redirect_text,
     build_case_title_from_content,
     is_header_page,
+    normalize_wikitext_for_comparison,
     wikitexts_match,
 )
 
@@ -48,6 +51,8 @@ UNCHECKED_OVERWRITE_CATEGORY_RE = re.compile(
     re.IGNORECASE,
 )
 OS_REDACTION_RE = re.compile(r"\{\{PRC-redact\|\d+\|os=yes\}\}")
+HEADER_TEMPLATE_START_RE = re.compile(r"^\s*\{\{\s*header/裁判文书\b", re.IGNORECASE)
+HEADER_PARAM_LINE_RE = re.compile(r"^(\s*\|\s*)([^=|\n]+?)(\s*=\s*)(.*?)(\s*)$")
 
 
 def utc_now_iso() -> str:
@@ -108,6 +113,101 @@ def _build_progress_description(action: str, uploaded: int, failed: int, skipped
 def _is_header_landing_page(page_state) -> bool:
     """Return whether a resolved page lands on a real court-document page."""
     return bool(page_state and page_state.exists and page_state.content and is_header_page(page_state.content))
+
+
+def _find_header_template_span(lines: list[str]) -> Optional[tuple[int, int]]:
+    """Return the start/end line indexes for a simple multiline court header."""
+    for start_index, line in enumerate(lines):
+        if not HEADER_TEMPLATE_START_RE.match(line):
+            continue
+        for end_index in range(start_index + 1, len(lines)):
+            if lines[end_index].strip() == "}}":
+                return start_index, end_index
+        return None
+    return None
+
+
+def _split_header_param_lines(lines: list[str]) -> Optional[tuple[list[tuple], list[tuple[str, str]]]]:
+    """Return a header skeleton and ordered parameter values."""
+    skeleton: list[tuple] = []
+    values: list[tuple[str, str]] = []
+
+    for line in lines:
+        match = HEADER_PARAM_LINE_RE.match(line)
+        if not match:
+            skeleton.append(("text", line))
+            continue
+
+        key = match.group(2).strip()
+        skeleton.append(("param", match.group(1), key, match.group(3), match.group(5)))
+        values.append((key, match.group(4)))
+
+    return skeleton, values
+
+
+def _normalize_case_number_brackets(value: str) -> str:
+    return re.sub(r"\s+", "", value or "").replace("(", "（").replace(")", "）")
+
+
+def _is_safe_header_param_update(key: str, existing_value: str, import_value: str) -> bool:
+    if existing_value == import_value:
+        return True
+
+    if not existing_value.strip() and import_value.strip():
+        return True
+
+    if key == "案号":
+        return _normalize_case_number_brackets(existing_value) == _normalize_case_number_brackets(import_value)
+
+    return False
+
+
+def _is_safe_header_only_update(import_wikitext: str, existing_content: str) -> bool:
+    """Return whether the import only fills header params or normalizes 案号 brackets."""
+    existing_text = normalize_wikitext_for_comparison(existing_content)
+    import_text = normalize_wikitext_for_comparison(import_wikitext)
+    if existing_text == import_text:
+        return False
+
+    existing_lines = existing_text.split("\n")
+    import_lines = import_text.split("\n")
+    existing_span = _find_header_template_span(existing_lines)
+    import_span = _find_header_template_span(import_lines)
+    if not existing_span or not import_span:
+        return False
+
+    existing_start, existing_end = existing_span
+    import_start, import_end = import_span
+    if existing_lines[:existing_start] != import_lines[:import_start]:
+        return False
+    if existing_lines[existing_end + 1 :] != import_lines[import_end + 1 :]:
+        return False
+
+    existing_skeleton, existing_values = _split_header_param_lines(existing_lines[existing_start : existing_end + 1])
+    import_skeleton, import_values = _split_header_param_lines(import_lines[import_start : import_end + 1])
+    if existing_skeleton != import_skeleton or len(existing_values) != len(import_values):
+        return False
+
+    changed = False
+    for (existing_key, existing_value), (import_key, import_value) in zip(existing_values, import_values):
+        if existing_key != import_key:
+            return False
+        if existing_value != import_value:
+            changed = True
+        if not _is_safe_header_param_update(existing_key, existing_value, import_value):
+            return False
+
+    return changed
+
+
+def _is_safe_redaction_marker_update(import_wikitext: str, existing_content: str) -> bool:
+    """Return whether the import only normalizes redaction marker runs to templates."""
+    existing_text = normalize_wikitext_for_comparison(existing_content)
+    import_text = normalize_wikitext_for_comparison(import_wikitext)
+    if existing_text == import_text:
+        return False
+
+    return normalize_redaction_markers(existing_text) == normalize_redaction_markers(import_text)
 
 
 def ensure_case_number_redirect(
@@ -241,6 +341,33 @@ def _hide_overwrite_revision_for_review(
             final_title=target_title,
             case_title=case_title,
             message="Page exists but content could not be fetched for review revert",
+            timestamp=timestamp,
+        )
+
+    if (
+        _is_safe_header_only_update(import_wikitext, existing_content)
+        or _is_safe_redaction_marker_update(import_wikitext, existing_content)
+    ):
+        try:
+            save_page(target_title, import_wikitext, build_edit_summary(wenshu_id))
+        except Exception as e:
+            return UploadResult(
+                title=source_title,
+                wenshu_id=wenshu_id,
+                status='failed',
+                final_title=target_title,
+                case_title=case_title,
+                message=f"Failed to save safe automated update: {e}",
+                timestamp=timestamp,
+            )
+
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='uploaded',
+            final_title=target_title,
+            case_title=case_title,
+            message=_append_message(message, "Saved safe automated update without review category"),
             timestamp=timestamp,
         )
 
