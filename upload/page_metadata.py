@@ -19,14 +19,59 @@ COURT_DISAMBIG_TEMPLATE_PREFIXES = ("{{裁判文书消歧义页",)
 LEGACY_VERSIONS_TEMPLATE_PREFIXES = ("{{versions",)
 VERSIONS_TEMPLATE_PREFIXES = COURT_DISAMBIG_TEMPLATE_PREFIXES + LEGACY_VERSIONS_TEMPLATE_PREFIXES
 REDIRECT_PATTERN = re.compile(r"^\s*#redirect\s*\[\[([^\]]+)\]\]", re.IGNORECASE | re.MULTILINE)
+LEADING_JUNK_RE = re.compile(r"^[^\u4e00-\u9fff]+")
+CASE_NUMBER_RE = re.compile(r"（.*?号(?:之[一二三四五六七八九十百千万〇零]+)?")
+NON_CJK_RE = re.compile(r"[^\u4e00-\u9fff]+")
+DOC_TYPE_RE = re.compile(r"[\u4e00-\u9fff]*(?:裁定书|判决书|决定书|通知书|调解书|裁决书|支付令)")
+
+
+def _compact_metadata_text(text: str) -> str:
+    if not text:
+        return ""
+
+    return re.sub(r"\s+", "", text)
+
+
+def normalize_court_name(court: str) -> str:
+    """Strip junk around a court name and require the value to end at 法院."""
+    court = _compact_metadata_text(court)
+    if not court:
+        return ""
+
+    court = LEADING_JUNK_RE.sub("", court)
+    court_end = court.rfind("法院")
+    if court_end == -1:
+        return ""
+
+    return court[:court_end + len("法院")]
 
 
 def normalize_case_number(case_number: str) -> str:
-    """Normalize case-number parentheses to full-width Chinese ones."""
+    """Extract a case-number span beginning with （ and ending with 号."""
     if not case_number:
-        return case_number
+        return ""
 
-    return case_number.replace("(", "（").replace(")", "）")
+    case_number = _compact_metadata_text(case_number)
+    case_number = case_number.replace("(", "（").replace(")", "）")
+    match = CASE_NUMBER_RE.search(case_number)
+    if not match:
+        return ""
+
+    return match.group(0)
+
+
+def normalize_doc_type(doc_type: str) -> str:
+    """Strip document type metadata to CJK characters only."""
+    doc_type = _compact_metadata_text(doc_type)
+    if not doc_type:
+        return ""
+
+    doc_type = NON_CJK_RE.sub("", doc_type)
+    match = DOC_TYPE_RE.search(doc_type)
+    if match:
+        return match.group(0)
+
+    return doc_type
 
 
 def _find_template_start(lines: list[str], prefixes: tuple[str, ...]) -> Optional[int]:
@@ -82,10 +127,7 @@ def parse_versions_metadata(page_text: str) -> Optional[dict[str, str]]:
 def is_header_page(page_text: str) -> bool:
     """Return whether page text looks like a court-document header page."""
     metadata = parse_header_metadata(page_text)
-    return bool(
-        metadata
-        and all(metadata.get(field, "").strip() for field in REQUIRED_CASE_TITLE_FIELDS)
-    )
+    return bool(metadata and build_case_title_from_metadata(metadata))
 
 
 def is_versions_page(page_text: str) -> bool:
@@ -108,15 +150,13 @@ def is_legacy_versions_page(page_text: str) -> bool:
 
 def build_case_title_from_metadata(metadata: dict[str, str]) -> Optional[str]:
     """Build the canonical case-number title from parsed header metadata."""
-    parts: list[str] = []
-
-    for field in REQUIRED_CASE_TITLE_FIELDS:
-        value = metadata.get(field, "").strip()
-        if not value:
-            return None
-        if field == "案号":
-            value = normalize_case_number(value)
-        parts.append(value)
+    parts = [
+        normalize_court_name(metadata.get("court", "")),
+        normalize_case_number(metadata.get("案号", "")),
+        normalize_doc_type(metadata.get("type", "")),
+    ]
+    if not all(parts):
+        return None
 
     return "".join(parts)
 

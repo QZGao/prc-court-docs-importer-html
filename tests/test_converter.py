@@ -31,13 +31,18 @@ from convert.location import (
     infer_location_from_court,
     extract_province_from_court,
 )
+from upload.page_metadata import build_case_title_from_content
 from convert.converter import (
     ConversionInterrupted,
     convert_document,
+    extract_case_number_from_s22,
     extract_date_components_from_s31,
     extract_doc_type_from_s22,
     infer_court_with_province,
     iter_json_objects,
+    normalize_case_number_value,
+    normalize_court_name,
+    normalize_doc_type,
     process_jsonl_stream,
 )
 
@@ -344,10 +349,46 @@ class TestDocTypeExtraction:
         result = extract_doc_type_from_s22(s22, "法院", "号")
         assert result == "民事判决书"
 
+    def test_extraction_removes_deduced_court_and_case_number(self):
+        s22 = "No.001 柳州市柳南区人民法院\n执行裁定书\n（2019）桂0204民初2440号附件"
+        result = extract_doc_type_from_s22(s22, "柳州市柳南区人民法院", "（2019）桂0204民初2440号")
+        assert result == "执行裁定书"
+
+    def test_extraction_returns_empty_when_s22_has_only_court_and_case_number(self):
+        s22 = "柳州市柳南区人民法院\n（2019）桂0204民初2440号"
+        result = extract_doc_type_from_s22(s22, "柳州市柳南区人民法院", "（2019）桂0204民初2440号")
+        assert result == ""
+
+    def test_extraction_preserves_type_after_suffixed_case_number(self):
+        s22 = "柳州市柳南区人民法院\n（2019）桂0204民初2440号之一\n执行裁定书"
+        result = extract_doc_type_from_s22(s22, "柳州市柳南区人民法院", "（2019）桂0204民初2440号")
+        assert result == "执行裁定书"
+
 
 class TestCourtInference:
     """Tests for court name inference with province."""
-    
+
+    def test_normalize_court_name_removes_leading_non_cjk_junk(self):
+        assert normalize_court_name("  12.【x】北京市第一中级人民法院") == "北京市第一中级人民法院"
+
+    def test_normalize_court_name_removes_trailing_junk_after_fayuan(self):
+        assert normalize_court_name("北京市第一中级人民法院（执行局）") == "北京市第一中级人民法院"
+
+    def test_normalize_case_number_extracts_parenthesized_number_through_hao(self):
+        assert normalize_case_number_value("案号：(2024)京01执123号附件") == "（2024）京01执123号"
+
+    def test_normalize_case_number_keeps_zhi_suffix(self):
+        assert normalize_case_number_value("案号：(2024)京01执123号之一附件") == "（2024）京01执123号之一"
+
+    def test_normalize_doc_type_keeps_only_cjk(self):
+        assert normalize_doc_type("No. 执 行 裁 定 书 123") == "执行裁定书"
+
+    def test_extract_case_number_from_s22(self):
+        assert extract_case_number_from_s22("柳州市柳南区人民法院\n（2019）桂0204民初2440号") == "（2019）桂0204民初2440号"
+
+    def test_extract_case_number_from_s22_keeps_zhi_suffix(self):
+        assert extract_case_number_from_s22("柳州市柳南区人民法院\n（2019）桂0204民初2440号之一") == "（2019）桂0204民初2440号之一"
+
     def test_from_s22(self):
         s22 = "江西省南昌市红谷滩区人民法院\n执行裁定书\n（2022）赣0113执6828号之一"
         result = infer_court_with_province("南昌市红谷滩区人民法院", s22)
@@ -356,6 +397,11 @@ class TestCourtInference:
     def test_fallback_to_s2(self):
         result = infer_court_with_province("南昌市红谷滩区人民法院", "")
         assert result == "南昌市红谷滩区人民法院"
+
+    def test_inference_removes_leading_non_cjk_junk(self):
+        s22 = "No.001 北京市第一中级人民法院\n执行裁定书\n（2024）京01执123号"
+        result = infer_court_with_province("x北京市第一中级人民法院", s22)
+        assert result == "北京市第一中级人民法院"
 
 
 class TestFullConversion:
@@ -555,6 +601,104 @@ class TestWikitextRendering:
         assert "|year = 2024" in result.wikitext
         assert "|month = 9" in result.wikitext
         assert "|day = 30" in result.wikitext
+
+    def test_convert_document_strips_leading_junk_from_parsed_court_everywhere(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-6",
+            "s2": "北京市第一中级人民法院",
+            "s7": "（2024）京01执123号",
+            "s22": "北京市第一中级人民法院\n执行裁定书\n（2024）京01执123号",
+            "qwContent": """
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>No.001 北京市第一中级人民法院（执行局）</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>No.执行裁定书123</div>
+                <div style='TEXT-ALIGN: right;'>（2024）京01执123号附件</div>
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>二〇二四年一月一日</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.court == "北京市第一中级人民法院"
+        assert result.doc_type == "执行裁定书"
+        assert result.doc_id == "（2024）京01执123号"
+        assert "|court = 北京市第一中级人民法院" in result.wikitext
+        assert "|type = 执行裁定书" in result.wikitext
+        assert "|案号 = （2024）京01执123号" in result.wikitext
+        assert build_case_title_from_content(result.wikitext) == "北京市第一中级人民法院（2024）京01执123号执行裁定书"
+        assert "No.001" not in result.wikitext
+        assert "附件" not in result.wikitext
+
+    def test_convert_document_strips_leading_junk_from_fallback_court_everywhere(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-7",
+            "s2": "x北京市第一中级人民法院",
+            "s7": "（2024）京01执123号",
+            "s22": "No.001 北京市第一中级人民法院\n执行裁定书\n（2024）京01执123号",
+            "s31": "2024-09-30",
+            "qwContent": """
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.court == "北京市第一中级人民法院"
+        assert "|court = 北京市第一中级人民法院" in result.wikitext
+        assert build_case_title_from_content(result.wikitext) == "北京市第一中级人民法院（2024）京01执123号执行裁定书"
+        assert "No.001" not in result.wikitext
+
+    def test_convert_document_extracts_type_after_court_and_case_fallbacks(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-8",
+            "s2": "柳州市柳南区人民法院",
+            "s7": "（2019）桂0204民初2440号",
+            "s22": "柳州市柳南区人民法院\n（2019）桂0204民初2440号",
+            "s31": "2019-09-30",
+            "qwContent": """
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.court == "柳州市柳南区人民法院"
+        assert result.doc_id == "（2019）桂0204民初2440号"
+        assert result.doc_type == ""
+
+    def test_convert_document_keeps_zhi_suffix_in_case_number(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-9",
+            "s2": "柳州市柳南区人民法院",
+            "s7": "（2019）桂0204民初2440号之一",
+            "s22": "柳州市柳南区人民法院\n执行裁定书\n（2019）桂0204民初2440号之一",
+            "s31": "2019-09-30",
+            "qwContent": """
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.doc_id == "（2019）桂0204民初2440号之一"
+        assert "|案号 = （2019）桂0204民初2440号之一" in result.wikitext
+        assert build_case_title_from_content(result.wikitext) == "柳州市柳南区人民法院（2019）桂0204民初2440号之一执行裁定书"
 
     def test_convert_document_prefers_parsed_html_date_over_s31(self):
         raw_json = {

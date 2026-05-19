@@ -9,7 +9,7 @@ from upload import mediawiki
 from upload.mediawiki import PageSnapshot, ResolvedPage
 from upload import uploader
 from upload import conflict_resolution
-from upload.page_metadata import extract_redirect_target
+from upload.page_metadata import build_case_title_from_content, extract_redirect_target
 
 
 def make_header_page(
@@ -67,6 +67,40 @@ def make_legacy_versions_page(title: str, court: str, entry_title: str) -> str:
         [[Category:{court}]]
         """
     )
+
+
+def test_build_case_title_strips_header_metadata_junk():
+    content = make_header_page(
+        title="共享标题",
+        court="No.001 北京市第一中级人民法院（执行局）",
+        doc_type="No.民事判决书123",
+        case_number="案号：(2024)京01民终1号之一附件",
+    )
+
+    assert build_case_title_from_content(content) == "北京市第一中级人民法院（2024）京01民终1号之一民事判决书"
+
+
+def test_conflict_resolution_compares_cleaned_courts():
+    existing_content = make_header_page(
+        title="共享标题",
+        court="No.001 北京市第一中级人民法院（执行局）",
+        doc_type="No.民事判决书123",
+        case_number="案号：(2024)京01民终1号附件",
+    )
+    draft_content = make_header_page(
+        title="共享标题",
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终2号",
+    )
+
+    is_resolvable, scenario = conflict_resolution.is_conflict_resolvable(
+        existing_content,
+        draft_content,
+    )
+
+    assert is_resolvable is True
+    assert scenario == "Existing page is a {{Header/裁判文书}} page from same court"
 
 
 def test_post_query_uses_pywikibot_simple_request(monkeypatch):

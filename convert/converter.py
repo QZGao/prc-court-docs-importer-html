@@ -26,6 +26,10 @@ from .html_normalizer import (
 from .wikitext_renderer import render_wikitext
 
 console = Console()
+LEADING_JUNK_RE = re.compile(r'^[^\u4e00-\u9fff]+')
+CASE_NUMBER_RE = re.compile(r'（.*?号(?:之[一二三四五六七八九十百千万〇零]+)?')
+NON_CJK_RE = re.compile(r'[^\u4e00-\u9fff]+')
+DOC_TYPE_RE = re.compile(r'[\u4e00-\u9fff]*(?:裁定书|判决书|决定书|通知书|调解书|裁决书|支付令)')
 
 
 class ConversionInterrupted(KeyboardInterrupt):
@@ -59,11 +63,80 @@ class ConversionError:
     timestamp: str
 
 
+def _compact_metadata_text(text: str) -> str:
+    """Remove metadata whitespace after prior Unicode cleanup."""
+    if not text:
+        return ""
+
+    return re.sub(r'\s+', '', text)
+
+
+def _remove_once(text: str, fragment: str) -> str:
+    """Remove one exact metadata fragment from text when present."""
+    if not text or not fragment:
+        return text
+
+    return text.replace(fragment, '', 1)
+
+
+def normalize_court_name(court: str) -> str:
+    """Strip junk around a court name and require the value to end at 法院."""
+    court = _compact_metadata_text(court)
+    if not court:
+        return ""
+
+    court = LEADING_JUNK_RE.sub('', court)
+    court_end = court.rfind('法院')
+    if court_end == -1:
+        return ""
+
+    return court[:court_end + len('法院')]
+
+
+def normalize_case_number_value(case_number: str) -> str:
+    """Extract a case number span beginning with （ and ending with 号."""
+    case_number = _compact_metadata_text(case_number)
+    if not case_number:
+        return ""
+
+    case_number = normalize_case_number_parentheses(case_number)
+    match = CASE_NUMBER_RE.search(case_number)
+    if not match:
+        return ""
+
+    return match.group(0)
+
+
+def normalize_doc_type(doc_type: str) -> str:
+    """Strip document type metadata to CJK characters only."""
+    doc_type = _compact_metadata_text(doc_type)
+    if not doc_type:
+        return ""
+
+    doc_type = NON_CJK_RE.sub('', doc_type)
+    match = DOC_TYPE_RE.search(doc_type)
+    if match:
+        return match.group(0)
+
+    return doc_type
+
+
+def extract_case_number_from_s22(s22: str) -> str:
+    """Extract a normalized case number from the s22 fallback field."""
+    s22 = normalize_case_number_parentheses(_compact_metadata_text(s22))
+    if not s22:
+        return ""
+
+    return normalize_case_number_value(s22)
+
+
 def extract_doc_type_from_s22(s22: str, court: str, doc_id: str) -> str:
     """
     Extract document type from s22 field by removing court and docID.
     
-    s22 format: "Court\nDocType\nDocID"
+    s22 often looks like "Court\nDocType\nDocID", but may omit the type or
+    move fields. Remove the already-deduced court and case number first, then
+    normalize whatever remains as the type.
     
     Args:
         s22: The s22 field value
@@ -73,19 +146,16 @@ def extract_doc_type_from_s22(s22: str, court: str, doc_id: str) -> str:
     Returns:
         The extracted document type
     """
-    if not s22:
+    remainder = normalize_case_number_parentheses(_compact_metadata_text(s22))
+    if not remainder:
         return ""
-    
-    lines = s22.strip().split('\n')
-    
-    # The document type is typically the second line
-    if len(lines) >= 2:
-        doc_type = lines[1].strip()
-        # Clean up any extra whitespace
-        doc_type = re.sub(r'\s+', '', doc_type)
-        return doc_type
-    
-    return ""
+
+    remainder = _remove_once(remainder, normalize_court_name(remainder))
+    remainder = _remove_once(remainder, normalize_court_name(court))
+    remainder = CASE_NUMBER_RE.sub('', remainder, count=1)
+    remainder = _remove_once(remainder, normalize_case_number_value(doc_id))
+
+    return normalize_doc_type(remainder)
 
 
 def extract_date_components_from_s31(s31: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -118,17 +188,11 @@ def infer_court_with_province(s2: str, s22: str) -> str:
     Returns:
         Court name with province prefix
     """
-    if not s22:
-        return s2
+    full_court = normalize_court_name(s22)
+    if full_court:
+        return full_court
     
-    lines = s22.strip().split('\n')
-    if lines:
-        # The first line should be the full court name
-        full_court = re.sub(r'\s+', '', lines[0])
-        if full_court:
-            return full_court
-    
-    return s2
+    return normalize_court_name(s2)
 
 
 def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Optional[ConversionError]]:
@@ -154,7 +218,7 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
         court_s2 = normalize_redaction_markers(
             remove_cjk_spaces(remove_unicode_other_chars(raw_json.get('s2', '').strip()))
         )
-        doc_id = normalize_case_number_parentheses(
+        doc_id = normalize_case_number_value(
             normalize_redaction_markers(remove_unicode_other_chars(raw_json.get('s7', '').strip()))
         )
         s22 = normalize_redaction_markers(
@@ -200,13 +264,9 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
     
     # 3. Determine court name (prefer parsed value, fallback to s22/s2)
     try:
-        if doc.court_name:
-            court = doc.court_name
-        else:
+        court = normalize_court_name(doc.court_name)
+        if not court:
             court = infer_court_with_province(court_s2, s22)
-        
-        # Clean up whitespace
-        court = re.sub(r'\s+', '', court)
     except Exception as e:
         return None, ConversionError(
             error_stage="block_detect",
@@ -215,26 +275,13 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
             timestamp=timestamp,
         )
     
-    # 4. Determine document type
+    # 4. Determine case number and date metadata fallbacks
     try:
-        if doc.doc_type:
-            doc_type = re.sub(r'\s+', '', doc.doc_type)
-        else:
-            doc_type = extract_doc_type_from_s22(s22, court, doc_id)
-    except Exception as e:
-        return None, ConversionError(
-            error_stage="block_detect",
-            error_message=f"Failed to determine document type: {e}",
-            raw_json=raw_json,
-            timestamp=timestamp,
-        )
-
-    # 5. Determine case number and date metadata fallbacks
-    try:
-        if doc.doc_id:
-            case_number = re.sub(r'\s+', '', doc.doc_id)
-        else:
+        case_number = normalize_case_number_value(doc.doc_id)
+        if not case_number:
             case_number = doc_id
+        if not case_number:
+            case_number = extract_case_number_from_s22(s22)
 
         fallback_date = extract_date_components_from_s31(s31)
     except Exception as e:
@@ -245,14 +292,24 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
             timestamp=timestamp,
         )
 
-    # Fill parsed document metadata only when HTML parsing could not find it,
-    # so renderer-level behavior remains driven by parsed HTML where available.
-    if not doc.court_name:
-        doc.court_name = court
-    if not doc.doc_type:
-        doc.doc_type = doc_type
-    if not doc.doc_id:
-        doc.doc_id = case_number
+    # 5. Determine document type after court and case number are known
+    try:
+        doc_type = normalize_doc_type(doc.doc_type)
+        if not doc_type:
+            doc_type = extract_doc_type_from_s22(s22, court, case_number)
+    except Exception as e:
+        return None, ConversionError(
+            error_stage="block_detect",
+            error_message=f"Failed to determine document type: {e}",
+            raw_json=raw_json,
+            timestamp=timestamp,
+        )
+
+    # Keep rendered metadata aligned with the cleaned converter result so
+    # upload-side case-title redirects and conflict resolution see the same court.
+    doc.court_name = court
+    doc.doc_type = doc_type
+    doc.doc_id = case_number
     
     # 6. Render wikitext
     try:

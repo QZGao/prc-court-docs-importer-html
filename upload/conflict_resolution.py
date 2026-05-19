@@ -23,6 +23,8 @@ from .page_metadata import (
     is_header_page,
     is_legacy_versions_page,
     is_versions_page,
+    normalize_court_name,
+    normalize_doc_type,
     parse_header_metadata,
     parse_versions_metadata,
     wikitexts_match,
@@ -48,7 +50,7 @@ def extract_versions_noauthor(content: str) -> Optional[str]:
     metadata = parse_versions_metadata(content)
     if not metadata:
         return None
-    value = (metadata.get("court", "") or metadata.get("noauthor", "")).strip()
+    value = normalize_court_name(metadata.get("court", "") or metadata.get("noauthor", ""))
     return value or None
 
 
@@ -74,7 +76,7 @@ def extract_header_court(content: str) -> Optional[str]:
     metadata = extract_header_metadata(content)
     if not metadata:
         return None
-    value = metadata.get("court", "").strip()
+    value = normalize_court_name(metadata.get("court", ""))
     return value or None
 
 
@@ -83,7 +85,7 @@ def extract_header_type_from_content(content: str) -> Optional[str]:
     metadata = extract_header_metadata(content)
     if not metadata:
         return None
-    value = metadata.get("type", "").strip()
+    value = normalize_doc_type(metadata.get("type", ""))
     return value or None
 
 
@@ -256,9 +258,12 @@ def convert_legacy_versions_page_content(
 
     metadata = parse_versions_metadata(existing_content) or {}
     title = metadata.get("title", "").strip() or original_title
-    court = (metadata.get("court", "") or metadata.get("noauthor", "")).strip() or fallback_court
+    court = (
+        normalize_court_name(metadata.get("court", "") or metadata.get("noauthor", ""))
+        or normalize_court_name(fallback_court)
+    )
     inferred_year, inferred_type = infer_year_type_from_categories(existing_content)
-    header_type = inferred_type or fallback_type
+    header_type = normalize_doc_type(inferred_type or fallback_type)
 
     if not court or not header_type:
         return None
@@ -280,8 +285,8 @@ def add_entry_to_versions_page(
     """Add a new entry to an existing disambiguation page and sort all entries."""
     metadata = parse_versions_metadata(content) or {}
     title = metadata.get("title", "").strip()
-    existing_court = (metadata.get("court", "") or metadata.get("noauthor", "")).strip()
-    page_type = (metadata.get("type", "") or header_type or "").strip()
+    existing_court = normalize_court_name(metadata.get("court", "") or metadata.get("noauthor", ""))
+    page_type = normalize_doc_type(metadata.get("type", "") or header_type or "")
 
     if title and page_type:
         if existing_court and new_entry_court and existing_court != new_entry_court:
@@ -399,7 +404,7 @@ def try_resolve_conflict(
     if not draft_metadata:
         return False, None, "Could not extract {{Header/裁判文书}} metadata from draft content"
 
-    draft_court = draft_metadata.get("court", "").strip()
+    draft_court = normalize_court_name(draft_metadata.get("court", ""))
     if not draft_court:
         return False, None, "Could not extract court from draft header"
 
@@ -446,7 +451,7 @@ def _resolve_versions_page_conflict(
     log(f"New draft title: [[{new_draft_title}]]", True)
 
     draft_metadata = extract_header_metadata(draft_content) or {}
-    draft_type = draft_metadata.get("type", "").strip()
+    draft_type = normalize_doc_type(draft_metadata.get("type", ""))
 
     # Update disambiguation page with new entry
     existing_entries = extract_versions_entries(existing_content)
@@ -516,10 +521,10 @@ def _resolve_header_page_conflict(
 
     new_existing_title = build_case_title_from_metadata(existing_metadata)
     new_draft_title = build_case_title_from_metadata(draft_metadata)
-    existing_court = existing_metadata.get("court", "").strip()
-    existing_header_type = existing_metadata.get("type", "").strip()
-    draft_court = draft_metadata.get("court", "").strip()
-    draft_header_type = draft_metadata.get("type", "").strip()
+    existing_court = normalize_court_name(existing_metadata.get("court", ""))
+    existing_header_type = normalize_doc_type(existing_metadata.get("type", ""))
+    draft_court = normalize_court_name(draft_metadata.get("court", ""))
+    draft_header_type = normalize_doc_type(draft_metadata.get("type", ""))
 
     if existing_court == draft_court:
         log(
@@ -660,7 +665,7 @@ def is_conflict_resolvable(
     if not draft_metadata:
         return False, "Could not extract draft {{Header/裁判文书}} metadata"
 
-    draft_court = draft_metadata.get("court", "").strip()
+    draft_court = normalize_court_name(draft_metadata.get("court", ""))
     if not draft_court:
         return False, "Could not extract court from draft header"
 
