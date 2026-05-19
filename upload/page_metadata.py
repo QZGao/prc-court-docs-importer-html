@@ -161,12 +161,26 @@ def build_case_title_from_metadata(metadata: dict[str, str]) -> Optional[str]:
     return "".join(parts)
 
 
+def build_case_number_from_metadata(metadata: dict[str, str]) -> Optional[str]:
+    """Build the normalized case-number identity from parsed header metadata."""
+    case_number = normalize_case_number(metadata.get("案号", ""))
+    return case_number or None
+
+
 def build_case_title_from_content(page_text: str) -> Optional[str]:
     """Build the canonical case-number title from header page text."""
     metadata = parse_header_metadata(page_text)
     if not metadata:
         return None
     return build_case_title_from_metadata(metadata)
+
+
+def build_case_number_from_content(page_text: str) -> Optional[str]:
+    """Build the normalized case-number identity from header page text."""
+    metadata = parse_header_metadata(page_text)
+    if not metadata:
+        return None
+    return build_case_number_from_metadata(metadata)
 
 
 def extract_redirect_target(page_text: str) -> Optional[str]:

@@ -110,13 +110,6 @@ def _is_header_landing_page(page_state) -> bool:
     return bool(page_state and page_state.exists and page_state.content and is_header_page(page_state.content))
 
 
-def _same_case_document(existing_content: str, draft_content: str) -> bool:
-    """Return whether two header pages resolve to the same canonical case title."""
-    existing_case_title = build_case_title_from_content(existing_content)
-    draft_case_title = build_case_title_from_content(draft_content)
-    return bool(existing_case_title and existing_case_title == draft_case_title)
-
-
 def ensure_case_number_redirect(
     final_title: str,
     wikitext: str,
@@ -303,6 +296,52 @@ def _hide_overwrite_revision_for_review(
     )
 
 
+def _handle_existing_case_header_page(
+    *,
+    source_title: str,
+    wenshu_id: str,
+    import_wikitext: str,
+    case_title: Optional[str],
+    page_state: object,
+    message: str,
+    timestamp: str,
+) -> Optional[UploadResult]:
+    """Compare an existing case-title header page and handle it as same-document content."""
+    if not _is_header_landing_page(page_state):
+        return None
+
+    target_title = (
+        getattr(page_state, "resolved_title", None)
+        or case_title
+        or getattr(page_state, "requested_title", None)
+        or source_title
+    )
+    existing_content = getattr(page_state, "content", None)
+
+    if wikitexts_match(import_wikitext, existing_content):
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='skipped',
+            final_title=target_title,
+            case_title=case_title,
+            redirect_status='existing',
+            message=message,
+            timestamp=timestamp,
+        )
+
+    return _hide_overwrite_revision_for_review(
+        source_title=source_title,
+        target_title=target_title,
+        wenshu_id=wenshu_id,
+        import_wikitext=import_wikitext,
+        existing_content=existing_content,
+        case_title=case_title,
+        message=message,
+        timestamp=timestamp,
+    )
+
+
 def upload_document(
     title: str,
     wenshu_id: str,
@@ -403,16 +442,6 @@ def upload_document(
                             timestamp=timestamp,
                         ), title, wikitext, existing_case_page=case_page)
 
-                    if is_header_page(existing_content) and _same_case_document(existing_content, wikitext):
-                        return _attach_case_redirect(UploadResult(
-                            title=title,
-                            wenshu_id=wenshu_id,
-                            status='skipped',
-                            final_title=title,
-                            message="Case number already exists at the original title",
-                            timestamp=timestamp,
-                        ), title, wikitext, existing_case_page=case_page)
-                    
                     # Check if conflict is resolvable
                     is_resolvable, scenario = is_conflict_resolvable(
                         existing_content, wikitext
@@ -437,17 +466,17 @@ def upload_document(
                                 else:
                                     new_page = resolve_page(new_title)
                                 if new_page.exists:
-                                    if _is_header_landing_page(new_page):
-                                        return UploadResult(
-                                            title=title,
-                                            wenshu_id=wenshu_id,
-                                            status='skipped',
-                                            final_title=new_page.resolved_title,
-                                            case_title=case_title or new_title,
-                                            redirect_status='existing',
-                                            message=f"Case-specific page already exists: {new_page.resolved_title}",
-                                            timestamp=timestamp,
-                                        )
+                                    case_header_result = _handle_existing_case_header_page(
+                                        source_title=title,
+                                        wenshu_id=wenshu_id,
+                                        import_wikitext=updated_wikitext,
+                                        case_title=new_title,
+                                        page_state=new_page,
+                                        message=f"Case-specific page already exists: {new_page.resolved_title or new_title}",
+                                        timestamp=timestamp,
+                                    )
+                                    if case_header_result:
+                                        return case_header_result
 
                                     # Case-specific page exists but does not land on a real document page.
                                     target_existing_content = new_page.content
@@ -460,7 +489,7 @@ def upload_document(
                                         wenshu_id=wenshu_id,
                                         import_wikitext=updated_wikitext,
                                         existing_content=target_existing_content,
-                                        case_title=case_title or new_title,
+                                        case_title=new_title,
                                         message=f"Case-specific page already exists: {new_title}",
                                         timestamp=timestamp,
                                     )
@@ -470,7 +499,7 @@ def upload_document(
                                     wenshu_id=wenshu_id,
                                     status='failed',
                                     final_title=new_title,
-                                    case_title=case_title or new_title,
+                                    case_title=new_title,
                                     message=f"Failed to check new title existence: {e}",
                                     timestamp=timestamp,
                                 )
@@ -497,7 +526,7 @@ def upload_document(
                                     wenshu_id=wenshu_id,
                                     status='failed',
                                     final_title=new_title,
-                                    case_title=case_title or new_title,
+                                    case_title=new_title,
                                     message=f"Failed to save after conflict resolution: {e}",
                                     timestamp=timestamp,
                                 )
@@ -512,17 +541,17 @@ def upload_document(
                                 timestamp=timestamp,
                             )
                     else:
-                        if _is_header_landing_page(case_page):
-                            return UploadResult(
-                                title=title,
-                                wenshu_id=wenshu_id,
-                                status='skipped',
-                                final_title=case_page.resolved_title,
-                                case_title=case_title,
-                                redirect_status='existing',
-                                message=f"Case-number page already exists: {case_page.resolved_title}",
-                                timestamp=timestamp,
-                            )
+                        case_header_result = _handle_existing_case_header_page(
+                            source_title=title,
+                            wenshu_id=wenshu_id,
+                            import_wikitext=wikitext,
+                            case_title=case_title,
+                            page_state=case_page,
+                            message=f"Case-number page already exists: {case_page.resolved_title if case_page else case_title}",
+                            timestamp=timestamp,
+                        )
+                        if case_header_result:
+                            return case_header_result
                         # Not resolvable - store the overwrite as a hidden revision for manual review.
                         return _hide_overwrite_revision_for_review(
                             source_title=title,
@@ -577,17 +606,17 @@ def upload_document(
             )
     
     # Page doesn't exist - create it
-    if _is_header_landing_page(case_page):
-        return UploadResult(
-            title=title,
-            wenshu_id=wenshu_id,
-            status='skipped',
-            final_title=case_page.resolved_title,
-            case_title=case_title,
-            redirect_status='existing',
-            message=f"Case-number page already exists: {case_page.resolved_title}",
-            timestamp=timestamp,
-        )
+    case_header_result = _handle_existing_case_header_page(
+        source_title=title,
+        wenshu_id=wenshu_id,
+        import_wikitext=wikitext,
+        case_title=case_title,
+        page_state=case_page,
+        message=f"Case-number page already exists: {case_page.resolved_title if case_page else case_title}",
+        timestamp=timestamp,
+    )
+    if case_header_result:
+        return case_header_result
 
     try:
         save_page(

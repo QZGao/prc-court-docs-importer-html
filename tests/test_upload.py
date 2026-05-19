@@ -9,7 +9,11 @@ from upload import mediawiki
 from upload.mediawiki import PageSnapshot, ResolvedPage
 from upload import uploader
 from upload import conflict_resolution
-from upload.page_metadata import build_case_title_from_content, extract_redirect_target
+from upload.page_metadata import (
+    build_case_number_from_content,
+    build_case_title_from_content,
+    extract_redirect_target,
+)
 
 
 def make_header_page(
@@ -78,6 +82,7 @@ def test_build_case_title_strips_header_metadata_junk():
     )
 
     assert build_case_title_from_content(content) == "北京市第一中级人民法院（2024）京01民终1号之一民事判决书"
+    assert build_case_number_from_content(content) == "（2024）京01民终1号之一"
 
 
 def test_conflict_resolution_compares_cleaned_courts():
@@ -220,6 +225,51 @@ def test_upload_document_skips_when_case_page_already_lands_on_header(monkeypatc
     assert "Case-number page already exists" in result.message
 
 
+def test_upload_document_reverts_overwrite_when_case_page_lands_on_different_header(monkeypatch):
+    title = "张三与李四民事判决书"
+    landing_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事裁定书",
+        case_number="（2024）京01民终1号",
+    )
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(
+            requested_title=requested_title,
+            exists=True,
+            is_redirect=True,
+            redirect_target=landing_title,
+            resolved_title=landing_title,
+            content=existing_content,
+        ),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (False, None))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "reverted_overwrite"
+    assert result.final_title == landing_title
+    assert result.case_title == landing_title
+    assert "Case-number page already exists" in result.message
+    assert len(saves) == 2
+    assert saves[0][0] == landing_title
+    assert saves[0][1] == wikitext
+    assert saves[1][0] == landing_title
+    assert saves[1][1] == f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+
+
 def test_upload_document_skips_identical_content_despite_line_ending_difference(monkeypatch):
     title = "张三与李四民事判决书"
     wikitext = make_header_page(
@@ -258,6 +308,51 @@ def test_upload_document_skips_identical_content_despite_line_ending_difference(
     assert result.case_title == case_title
     assert result.redirect_status == "existing"
     assert result.message == "Content identical to existing page"
+
+
+def test_upload_document_reverts_overwrite_for_same_case_number_with_different_metadata(monkeypatch):
+    title = "共享标题"
+    wikitext = make_header_page(
+        title=title,
+        court="乙法院",
+        doc_type="民事裁定书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = make_header_page(
+        title=title,
+        court="甲法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    case_title = "乙法院（2024）京01民终1号民事裁定书"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "reverted_overwrite"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert result.message == (
+        "Page exists, conflict not resolvable: "
+        "Existing page already uses the same case number as the draft; "
+        "Saved overwrite revision and restored original content with review category"
+    )
+    assert len(saves) == 2
+    assert saves[0][0] == title
+    assert saves[0][1] == wikitext
+    assert saves[0][2] == uploader.build_edit_summary("doc-1")
+    assert saves[1][0] == title
+    assert saves[1][1] == f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+    assert saves[1][2] == uploader.build_manual_revert_summary("doc-1")
 
 
 def test_upload_document_hides_overwritable_revision_with_review_category(monkeypatch):
@@ -435,6 +530,68 @@ def test_upload_document_skips_after_versions_resolution_when_case_page_exists(m
     assert resolve_calls["count"] == 1
 
 
+def test_upload_document_uses_same_case_number_versions_entry_as_overwrite_target(monkeypatch):
+    title = "共享标题"
+    existing_case_title = "甲法院（2024）京01民终1号民事判决书"
+    draft_case_title = "甲法院（2024）京01民终1号书"
+    wikitext = make_header_page(
+        title=title,
+        court="甲法院",
+        doc_type="书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_versions_content = make_versions_page(
+        title=title,
+        court="甲法院",
+        entry_title=existing_case_title,
+    )
+    existing_case_content = make_header_page(
+        title=title,
+        court="甲法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    expected_import_content = conflict_resolution.update_draft_for_conflict_resolution(
+        wikitext,
+        title,
+    )
+    saves = []
+
+    def fake_resolve_page(requested_title):
+        if requested_title == draft_case_title:
+            return ResolvedPage(requested_title=requested_title, exists=False)
+        if requested_title == existing_case_title:
+            return ResolvedPage(
+                requested_title=requested_title,
+                exists=True,
+                resolved_title=existing_case_title,
+                content=existing_case_content,
+            )
+        raise AssertionError(f"unexpected resolve_page title: {requested_title}")
+
+    monkeypatch.setattr(uploader, "resolve_page", fake_resolve_page)
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_versions_content))
+    monkeypatch.setattr(
+        conflict_resolution,
+        "save_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("versions page should not be saved")),
+    )
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "reverted_overwrite"
+    assert result.final_title == existing_case_title
+    assert result.case_title == existing_case_title
+    assert draft_case_title not in [save[0] for save in saves]
+    assert len(saves) == 2
+    assert saves[0][0] == existing_case_title
+    assert saves[0][1] == expected_import_content
+    assert saves[1][0] == existing_case_title
+    assert saves[1][1] == f"{existing_case_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+
+
 def test_upload_document_resolves_versions_page_from_different_court(monkeypatch):
     title = "共享标题"
     existing_court = "甲法院"
@@ -512,6 +669,71 @@ def test_try_resolve_conflict_skips_unchanged_versions_page_save(monkeypatch):
 
     assert resolved is True
     assert new_title == case_title
+    assert error is None
+
+
+def test_try_resolve_conflict_treats_same_case_number_as_same_header_document(monkeypatch):
+    original_title = "共享标题"
+    existing_content = make_header_page(
+        title=original_title,
+        court="甲法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    draft_content = make_header_page(
+        title=original_title,
+        court="乙法院",
+        doc_type="民事裁定书",
+        case_number="（2024）京01民终1号",
+    )
+
+    monkeypatch.setattr(
+        conflict_resolution,
+        "resolve_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("resolve_page should not be called")),
+    )
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is False
+    assert new_title is None
+    assert error == "Existing page already uses the same case number as the draft"
+
+
+def test_try_resolve_conflict_treats_same_case_number_as_existing_versions_entry(monkeypatch):
+    original_title = "共享标题"
+    existing_entry_title = "甲法院（2024）京01民终1号民事判决书"
+    draft_case_title = "乙法院（2024）京01民终1号民事裁定书"
+    draft_content = make_header_page(
+        title=original_title,
+        court="乙法院",
+        doc_type="民事裁定书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = make_versions_page(
+        title=original_title,
+        court="甲法院",
+        entry_title=existing_entry_title,
+    )
+
+    monkeypatch.setattr(
+        conflict_resolution,
+        "save_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("save_page should not be called")),
+    )
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is True
+    assert new_title == existing_entry_title
     assert error is None
 
 

@@ -18,11 +18,13 @@ from .mediawiki import (
     save_page,
 )
 from .page_metadata import (
+    build_case_number_from_metadata,
     build_case_title_from_content,
     build_case_title_from_metadata,
     is_header_page,
     is_legacy_versions_page,
     is_versions_page,
+    normalize_case_number,
     normalize_court_name,
     normalize_doc_type,
     parse_header_metadata,
@@ -161,6 +163,48 @@ def infer_court_from_case_title(title: str) -> Optional[str]:
     return court.strip() or None
 
 
+def infer_case_number_from_case_title(title: str) -> Optional[str]:
+    """Infer normalized case number from a case-number page title."""
+    case_number = normalize_case_number(title)
+    return case_number or None
+
+
+def find_entry_with_same_case_number(entry_titles: list[str], new_entry_title: str) -> Optional[str]:
+    """Return the existing entry title with the same normalized case number, if any."""
+    new_case_number = infer_case_number_from_case_title(new_entry_title)
+    if not new_case_number:
+        return None
+
+    for entry_title in entry_titles:
+        if infer_case_number_from_case_title(entry_title) == new_case_number:
+            return entry_title
+
+    return None
+
+
+def has_entry_with_same_case_number(entry_titles: list[str], new_entry_title: str) -> bool:
+    """Return whether any existing entry has the same normalized case number."""
+    return find_entry_with_same_case_number(entry_titles, new_entry_title) is not None
+
+
+def grouped_entries_have_case_number(
+    grouped_entries: dict[str, list[str]],
+    new_entry_title: str,
+) -> bool:
+    """Return whether any grouped entry has the same normalized case number."""
+    return has_entry_with_same_case_number(
+        [entry for entries in grouped_entries.values() for entry in entries],
+        new_entry_title,
+    )
+
+
+def append_entry_if_new_case_number(entry_titles: list[str], new_entry_title: str) -> list[str]:
+    """Append new_entry_title unless its normalized case number is already present."""
+    if has_entry_with_same_case_number(entry_titles, new_entry_title):
+        return entry_titles
+    return entry_titles + [new_entry_title]
+
+
 def build_grouped_versions_page_content(
     *,
     title: str,
@@ -291,6 +335,8 @@ def add_entry_to_versions_page(
     if title and page_type:
         if existing_court and new_entry_court and existing_court != new_entry_court:
             grouped_entries = extract_grouped_versions_entries(content, default_court=existing_court)
+            if grouped_entries_have_case_number(grouped_entries, new_entry_title):
+                return content
             grouped_entries.setdefault(new_entry_court, []).append(new_entry_title)
             return build_grouped_versions_page_content(
                 title=title,
@@ -306,7 +352,8 @@ def add_entry_to_versions_page(
                 inferred_court = infer_court_from_case_title(entry)
                 if inferred_court:
                     grouped_entries.setdefault(inferred_court, []).append(entry)
-            grouped_entries.setdefault(effective_new_entry_court, []).append(new_entry_title)
+            if not grouped_entries_have_case_number(grouped_entries, new_entry_title):
+                grouped_entries.setdefault(effective_new_entry_court, []).append(new_entry_title)
             return build_grouped_versions_page_content(
                 title=title,
                 header_type=page_type,
@@ -314,7 +361,7 @@ def add_entry_to_versions_page(
             )
 
         if existing_court:
-            all_entries = extract_versions_entries(content) + [new_entry_title]
+            all_entries = append_entry_if_new_case_number(extract_versions_entries(content), new_entry_title)
             return build_versions_page_content(
                 title=title,
                 noauthor=existing_court,
@@ -335,12 +382,13 @@ def add_entry_to_versions_page(
                 entry_line_indices.append(i)
 
     # Add new entry, deduplicate, and sort
-    all_entries = existing_entries + [new_entry_title]
+    new_entry_already_present = has_entry_with_same_case_number(existing_entries, new_entry_title)
+    all_entries = existing_entries if new_entry_already_present else existing_entries + [new_entry_title]
     sorted_entries = sort_versions_entries(all_entries)
 
     if entry_line_indices:
         if (
-            new_entry_title in existing_entries
+            new_entry_already_present
             and len(existing_entries) == len(set(existing_entries))
             and existing_entries == sorted_entries
         ):
@@ -373,6 +421,9 @@ def add_entry_to_versions_page(
         return "\n".join(lines)
 
     # Fallback: add before first [[Category:
+    if has_entry_with_same_case_number(existing_entries, new_entry_title):
+        return content
+
     for i, line in enumerate(lines):
         if line.strip().startswith("[[Category:"):
             lines.insert(i, f"* [[{new_entry_title}]]")
@@ -455,7 +506,8 @@ def _resolve_versions_page_conflict(
 
     # Update disambiguation page with new entry
     existing_entries = extract_versions_entries(existing_content)
-    new_entry_already_present = new_draft_title in existing_entries
+    matching_entry_title = find_entry_with_same_case_number(existing_entries, new_draft_title)
+    new_entry_already_present = matching_entry_title is not None
     base_versions = existing_content
     if is_legacy_versions_page(existing_content):
         converted_versions = convert_legacy_versions_page_content(
@@ -478,10 +530,10 @@ def _resolve_versions_page_conflict(
 
     if wikitexts_match(updated_versions, existing_content):
         log(
-            f"Disambiguation page [[{original_title}]] already contains [[{new_draft_title}]]",
+            f"Disambiguation page [[{original_title}]] already contains case number at [[{matching_entry_title or new_draft_title}]]",
             True,
         )
-        return True, new_draft_title, None
+        return True, matching_entry_title or new_draft_title, None
 
     try:
         save_page(
@@ -499,7 +551,7 @@ def _resolve_versions_page_conflict(
     except Exception as e:
         return False, None, f"Failed to update disambiguation page: {e}"
 
-    return True, new_draft_title, None
+    return True, matching_entry_title or new_draft_title, None
 
 
 def _resolve_header_page_conflict(
@@ -521,6 +573,8 @@ def _resolve_header_page_conflict(
 
     new_existing_title = build_case_title_from_metadata(existing_metadata)
     new_draft_title = build_case_title_from_metadata(draft_metadata)
+    existing_case_number = build_case_number_from_metadata(existing_metadata)
+    draft_case_number = build_case_number_from_metadata(draft_metadata)
     existing_court = normalize_court_name(existing_metadata.get("court", ""))
     existing_header_type = normalize_doc_type(existing_metadata.get("type", ""))
     draft_court = normalize_court_name(draft_metadata.get("court", ""))
@@ -539,10 +593,12 @@ def _resolve_header_page_conflict(
 
     if not new_existing_title or not new_draft_title:
         return False, None, "Could not build case-number title from header metadata"
+    if not existing_case_number or not draft_case_number:
+        return False, None, "Could not extract case number from header metadata"
     if not existing_court or not existing_header_type:
         return False, None, "Could not extract court/type from existing page header"
-    if new_existing_title == new_draft_title:
-        return False, None, "Existing page already uses the same case-number title as the draft"
+    if existing_case_number == draft_case_number:
+        return False, None, "Existing page already uses the same case number as the draft"
 
     log(f"Will move existing page to: [[{new_existing_title}]]", True)
     log(f"New draft title: [[{new_draft_title}]]", True)
@@ -678,7 +734,16 @@ def is_conflict_resolvable(
 
     # Check if existing page is a header page from same court
     if is_header_page(existing_content):
-        existing_court = extract_header_court(existing_content)
+        existing_metadata = extract_header_metadata(existing_content)
+        if not existing_metadata:
+            return False, "Could not extract existing court info"
+
+        existing_case_number = build_case_number_from_metadata(existing_metadata)
+        draft_case_number = build_case_number_from_metadata(draft_metadata)
+        if existing_case_number and existing_case_number == draft_case_number:
+            return False, "Existing page already uses the same case number as the draft"
+
+        existing_court = normalize_court_name(existing_metadata.get("court", ""))
         if not existing_court:
             return False, "Could not extract existing court info"
         if existing_court != draft_court:
