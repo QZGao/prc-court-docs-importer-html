@@ -5,12 +5,14 @@ This module converts ParsedDocument objects into zhwikisource-friendly wikitext.
 """
 
 import re
+from dataclasses import replace
 from typing import Optional, Tuple
 from .html_normalizer import (
     ParsedDocument,
     ContentBlock,
     BlockType,
     extract_date_components,
+    strip_signature_leading_junk,
 )
 from .location import infer_location_from_court
 
@@ -27,7 +29,7 @@ def escape_wikitext(text: str) -> str:
     return text
 
 
-def format_paragraph(block: ContentBlock) -> str:
+def format_paragraph(block: ContentBlock, force_gap: bool = False) -> str:
     """
     Format a paragraph block as wikitext.
     
@@ -35,7 +37,7 @@ def format_paragraph(block: ContentBlock) -> str:
     """
     text = escape_wikitext(block.text)
     
-    if block.indent:
+    if block.indent or force_gap:
         return f"{{{{gap}}}}{text}"
     return text
 
@@ -159,6 +161,29 @@ JUNK_PARAGRAPH_PATTERN = re.compile(
     rf'|第\s*\d+\s*页'                  # "第X页" page markers
     rf')$'
 )
+SENTENCE_LIKE_END_RE = re.compile(r'[。！？；;：:，,、）)】］》”"\'0-9０-９]$')
+CONTINUATION_START_RE = re.compile(r'^[\u4e00-\u9fff]')
+SECTION_START_RE = re.compile(
+    r'^(?:[一二三四五六七八九十百千万]+、|[0-9０-９]+[.．、]|[（(][一二三四五六七八九十0-9０-９]+[）)]|第[一二三四五六七八九十百千万0-9０-９]+[章节条款])'
+)
+PARTY_LABEL_RE = re.compile(
+    r'^(?:'
+    r'原告|被告|被告人|上诉人|被上诉人|申请人|被申请人|再审申请人|被执行人|申请执行人|'
+    r'第三人|公诉机关|抗诉机关|法定代表人|法定代理人|负责人|经营者|'
+    r'委托诉讼代理人|诉讼代理人|委托代理人|代理人|辩护人|指定辩护人|'
+    r'(?:[一二三四五六七八九十两0-9０-９]+)?(?:原告|被告|上诉人|被上诉人|申请人|被申请人|第三人)?'
+    r'(?:共同)?(?:委托诉讼代理人|诉讼代理人|委托代理人|代理人|辩护人)'
+    r')[：:]'
+)
+BODY_COLON_HEADING_RE = re.compile(r'^[\u4e00-\u9fff][^。！？；；\n]{1,50}：$')
+SIGNATURE_JOB_TITLES = [
+    '人民陪审员',
+    '校对责任人', '打印责任人',
+    '法官助理',
+    '审判长', '审判员',
+    '书记员', '执行员',
+    '校对人',
+]
 
 
 def is_junk_paragraph(text: str) -> bool:
@@ -173,6 +198,47 @@ def is_junk_paragraph(text: str) -> bool:
     return bool(JUNK_PARAGRAPH_PATTERN.match(text.strip()))
 
 
+def should_merge_paragraph_continuation(previous: ContentBlock, current: ContentBlock) -> bool:
+    """Return whether two parsed paragraphs are likely one OCR-split paragraph."""
+    if previous.block_type != BlockType.PARAGRAPH or current.block_type != BlockType.PARAGRAPH:
+        return False
+
+    previous_text = previous.text.strip()
+    current_text = current.text.strip()
+    if len(previous_text) < 20 or not current_text:
+        return False
+    if SENTENCE_LIKE_END_RE.search(previous_text):
+        return False
+    if SECTION_START_RE.match(current_text):
+        return False
+    if PARTY_LABEL_RE.match(current_text):
+        return False
+    return bool(CONTINUATION_START_RE.match(current_text))
+
+
+def merge_continuation_paragraphs(blocks: list) -> list:
+    """Join obvious paragraph fragments caused by source line wrapping."""
+    merged = []
+    for block in blocks:
+        if merged and should_merge_paragraph_continuation(merged[-1], block):
+            previous = merged[-1]
+            merged[-1] = replace(
+                previous,
+                text=f"{previous.text}{block.text}",
+                indent=previous.indent or block.indent,
+            )
+            continue
+        merged.append(block)
+    return merged
+
+
+def should_force_body_gap(block: ContentBlock) -> bool:
+    """Return whether an unindented body paragraph still needs {{gap}}."""
+    if block.block_type != BlockType.PARAGRAPH:
+        return False
+    return bool(BODY_COLON_HEADING_RE.match(block.text.strip()))
+
+
 def render_body_paragraphs(blocks: list) -> str:
     """
     Render body paragraphs with proper spacing.
@@ -180,7 +246,7 @@ def render_body_paragraphs(blocks: list) -> str:
     """
     result_lines = []
     
-    for block in blocks:
+    for block in merge_continuation_paragraphs(blocks):
         if block.block_type == BlockType.TABLE:
             result_lines.append(format_table(block))
             result_lines.append("")  # Blank line after table
@@ -191,7 +257,7 @@ def render_body_paragraphs(blocks: list) -> str:
             # Filter out junk paragraphs
             if is_junk_paragraph(block.text):
                 continue
-            result_lines.append(format_paragraph(block))
+            result_lines.append(format_paragraph(block, force_gap=should_force_body_gap(block)))
             result_lines.append("")  # Blank line between paragraphs
     
     return '\n'.join(result_lines)
@@ -209,25 +275,14 @@ def parse_signature_line(text: str) -> Tuple[Optional[str], Optional[str]]:
     Returns:
         Tuple of (job_title, name) with spaces normalized
     """
-    # Known job titles (longest first for greedy matching)
-    # Include 代理 prefix variants
-    base_jobs = [
-        '人民陪审员',
-        '校对责任人', '打印责任人',
-        '法官助理',
-        '审判长', '审判员',
-        '书记员', '执行员',
-        '校对人',
-    ]
-    
     job_titles = []
-    for job in base_jobs:
+    for job in SIGNATURE_JOB_TITLES:
         job_titles.append(f'代理{job}')
         job_titles.append(job)
     
     # Clean up spaces within the text (normalize all kinds of spaces)
     # But preserve the structure
-    cleaned = text.strip()
+    cleaned = strip_signature_leading_junk(text)
     
     # Remove extra spaces and colons between job title and name
     # Pattern: job_title + spaces/colons + name
@@ -246,6 +301,33 @@ def parse_signature_line(text: str) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def parse_signature_entries(text: str) -> list[Tuple[str, str]]:
+    """Parse one physical signature line, splitting merged role entries."""
+    cleaned = strip_signature_leading_junk(text)
+    compact = re.sub(r'\s+', '', cleaned).replace('：', ':')
+    if not compact:
+        return []
+
+    job_titles = []
+    for job in SIGNATURE_JOB_TITLES:
+        job_titles.append(f'代理{job}')
+        job_titles.append(job)
+    job_pattern = "|".join(re.escape(job) for job in sorted(job_titles, key=len, reverse=True))
+    matches = list(re.finditer(job_pattern, compact))
+    if not matches or matches[0].start() != 0:
+        return []
+
+    entries: list[Tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        name_start = match.end()
+        name_end = matches[index + 1].start() if index + 1 < len(matches) else len(compact)
+        name = compact[name_start:name_end].lstrip(':')
+        if not name:
+            return []
+        entries.append((match.group(0), name))
+    return entries
+
+
 def render_signature_section(blocks: list) -> str:
     """
     Render the {{裁判文书署名}} section.
@@ -256,15 +338,16 @@ def render_signature_section(blocks: list) -> str:
     from .html_normalizer import is_date_text
     lines = ["{{裁判文书署名|1="]
     for block in blocks:
-        text = block.text.strip()
+        text = strip_signature_leading_junk(block.text.strip())
         if not text:
             continue
         if is_date_text(text):
             lines.append(text)
         else:
-            job, name = parse_signature_line(text)
-            if job and name:
-                lines.append(f"{job}：{name}")
+            entries = parse_signature_entries(text)
+            if entries:
+                for job, name in entries:
+                    lines.append(f"{job}：{name}")
             else:
                 lines.append(text)
     lines.append("}}")
@@ -280,7 +363,7 @@ def render_further_notes(blocks: list) -> str:
         return ""
     
     result_lines = [""]
-    for block in blocks:
+    for block in merge_continuation_paragraphs(blocks):
         if block.block_type == BlockType.TABLE:
             result_lines.append(format_table(block))
             result_lines.append("")
@@ -288,7 +371,7 @@ def render_further_notes(blocks: list) -> str:
             # Filter out junk paragraphs
             if is_junk_paragraph(block.text):
                 continue
-            result_lines.append(format_paragraph(block))
+            result_lines.append(format_paragraph(block, force_gap=should_force_body_gap(block)))
             result_lines.append("")
     
     return '\n'.join(result_lines)

@@ -565,6 +565,200 @@ def test_upload_document_skips_structurally_worse_import_without_overwrite(monke
     assert saves == []
 
 
+def test_upload_document_skips_formatting_regressed_import_without_overwrite(monkeypatch):
+    title = "张三与李四民事判决书"
+    existing_content = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    ).replace("正文。", "{{gap}}借款人可以随时返还；贷款人可以催告。")
+    wikitext = existing_content.replace(
+        "{{gap}}借款人可以随时返还；贷款人可以催告。",
+        "{{gap}}借款人可以随时返还；贷款\n\n{{gap}}人可以催告。",
+    )
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "skipped"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert "Skipped formatting-regressed import" in result.message
+    assert saves == []
+
+
+def test_upload_document_skips_typographic_multiplication_regression_without_overwrite(monkeypatch):
+    title = "张三与李四民事判决书"
+    existing_content = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    ).replace("正文。", "{{gap}}赔偿损失3,459.60元（4,942.28元×70%）。")
+    wikitext = existing_content.replace("4,942.28元×70%", "4,942.28元ｘ70%")
+    case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "skipped"
+    assert result.final_title == title
+    assert result.case_title == case_title
+    assert "Skipped formatting-regressed import" in result.message
+    assert saves == []
+
+
+def test_upload_document_saves_pure_line_wrap_improvement_without_review(monkeypatch):
+    title = "张三与李四民事判决书"
+    existing_content = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    ).replace(
+        "正文。",
+        "{{gap}}第一百零八条：债务应当清偿。暂时无力偿还的，经债权人同意或者人民\n\n{{gap}}法院裁决的，可以由债务人分期偿还。",
+    )
+    wikitext = existing_content.replace("人民\n\n{{gap}}法院", "人民法院")
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert "Saved safe automated update without review category" in result.message
+    assert len(saves) == 1
+    assert saves[0][0] == title
+    assert saves[0][1] == wikitext
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+
+
+def test_upload_document_saves_pure_ungapped_line_wrap_improvement_without_review(monkeypatch):
+    title = "张三与李四民事判决书"
+    existing_content = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    ).replace(
+        "正文。",
+        "{{gap}}依照《中华人民共和国合同法》第八条、《最高人民法院关于贯彻执行<中华人民\n\n共和国民法通则>若干问题的意见》之规定，判决如下：",
+    )
+    wikitext = existing_content.replace("中华人民\n\n共和国", "中华人民共和国")
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert len(saves) == 1
+    assert saves[0][1] == wikitext
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+
+
+def test_upload_document_saves_pure_multiplication_improvement_without_review(monkeypatch):
+    title = "张三与李四民事判决书"
+    existing_content = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    ).replace("正文。", "{{gap}}赔偿损失3,459.60元（4,942.28元ｘ70%）。")
+    wikitext = existing_content.replace("4,942.28元ｘ70%", "4,942.28元×70%")
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert len(saves) == 1
+    assert saves[0][1] == wikitext
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+
+
+def test_upload_document_saves_pure_signature_structure_improvement_without_review(monkeypatch):
+    title = "宋某盗窃罪刑事判决书"
+    existing_content = make_header_page(
+        title=title,
+        court="四川省遂宁市船山区人民法院",
+        doc_type="刑事判决书",
+        case_number="（2021）川0903刑初522号",
+    ).replace(
+        "正文。",
+        "{{gap}}如不服本判决，可在接到判决书的次日起十日内提出上诉。\n\n"
+        "{{gap}}.审判员樊平\n\n"
+        "{{裁判文书署名|1=\n"
+        "二〇二一年十一月十五日\n"
+        "书记员：刘敏\n"
+        "}}",
+    )
+    wikitext = existing_content.replace(
+        "{{gap}}.审判员樊平\n\n{{裁判文书署名|1=\n",
+        "{{裁判文书署名|1=\n审判员：樊平\n",
+    )
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert len(saves) == 1
+    assert saves[0][1] == wikitext
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+
+
 def test_upload_document_keeps_mixed_improvement_and_regression_for_review(monkeypatch):
     title = "张三与李四刑事判决书"
     existing_content = make_header_page(

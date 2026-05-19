@@ -78,6 +78,18 @@ def main():
         action="store_true",
         help="Force-overwrite existing pages (for use with overwritable JSONL output)"
     )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Simulate uploads without editing wiki pages"
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print per-document decisions and wikitext diffs"
+    )
     
     parser.add_argument(
         "--log-dir",
@@ -97,10 +109,11 @@ def main():
     log_dir = args.log_dir or args.input.parent
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    uploaded_log = log_dir / f"uploaded_{timestamp}.log"
-    failed_log = log_dir / f"upload_failed_{timestamp}.jsonl"
-    skipped_log = log_dir / f"skipped_{timestamp}.log"
-    overwritable_log = log_dir / f"overwritable_{timestamp}.jsonl"
+    log_prefix = "dry_run_" if args.dry_run else ""
+    uploaded_log = log_dir / f"{log_prefix}uploaded_{timestamp}.log"
+    failed_log = log_dir / f"{log_prefix}upload_failed_{timestamp}.jsonl"
+    skipped_log = log_dir / f"{log_prefix}skipped_{timestamp}.log"
+    overwritable_log = log_dir / f"{log_prefix}overwritable_{timestamp}.jsonl"
     
     # Print configuration
     console.print("=" * 60)
@@ -113,6 +126,8 @@ def main():
     console.print(f"Max documents:  {args.max or 'all'}")
     console.print(f"Resolve:        {not args.no_resolve}")
     console.print(f"Overwrite:      {args.overwrite}")
+    console.print(f"Dry run:        {args.dry_run}")
+    console.print(f"Verbose:        {args.verbose}")
     console.print(f"Uploaded log:   {uploaded_log}")
     console.print(f"Failed log:     {failed_log}")
     console.print(f"Skipped log:    {skipped_log}")
@@ -139,6 +154,8 @@ def main():
             force_overwrite=args.overwrite,
             max_documents=args.max,
             skip_lines=args.skip,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
         )
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Upload interrupted by user[/yellow]")
@@ -154,7 +171,7 @@ def main():
     # Print summary
     console.print()
     console.print("=" * 60)
-    console.print("[bold green]Upload Complete[/bold green]")
+    console.print("[bold green]Dry Run Complete[/bold green]" if args.dry_run else "[bold green]Upload Complete[/bold green]")
     console.print("=" * 60)
     console.print(f"Total processed:       {total}")
     console.print(f"Successfully uploaded: {uploaded}")

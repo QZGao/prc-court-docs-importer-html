@@ -52,6 +52,10 @@ REDACTION_SEQUENCE_PATTERN = re.compile(
     r'[×XxＸｘ*＊∗✱﹡⁎٭※]*'           # Any continuation (mixed sequences: PTF**X etc.)
     r'(?![A-WYZa-wyz\d.])'             # No following Latin letter, digit, or decimal point
 )
+MULTIPLICATION_OPERATOR_RE = re.compile(
+    r'(?<=[0-9０-９%％）)元平方米])\s*[xXｘＸ*＊]\s*(?=[0-9０-９（(])'
+)
+SIGNATURE_LEADING_JUNK_RE = re.compile(r'^[.\u2026．·・、。]+')
 
 ALLOWED_UNICODE_OTHER_CHARS = {"\n", "\r", "\t"}
 
@@ -153,6 +157,19 @@ def normalize_title_redaction_markers(text: str) -> str:
     return REDACTION_SEQUENCE_PATTERN.sub(lambda match: '×' * len(match.group(0)), text)
 
 
+def normalize_multiplication_symbols(text: str) -> str:
+    """
+    Normalize OCR multiplication operators in numeric expressions to ×.
+
+    Redaction markers reuse x/*-like characters, so only normalize when the
+    character is between numeric/unit contexts such as "元ｘ70%" or "*48个月".
+    """
+    if not text:
+        return text
+
+    return MULTIPLICATION_OPERATOR_RE.sub('×', text)
+
+
 def normalize_case_number_parentheses(text: str) -> str:
     """
     Normalize half-width parentheses in case numbers to full-width Chinese ones.
@@ -163,6 +180,13 @@ def normalize_case_number_parentheses(text: str) -> str:
         return text
 
     return text.replace('(', '（').replace(')', '）')
+
+
+def strip_signature_leading_junk(text: str) -> str:
+    """Remove OCR filler dots that prefix standalone signature/date lines."""
+    if not text:
+        return ""
+    return SIGNATURE_LEADING_JUNK_RE.sub("", text.strip()).strip()
 
 
 class BlockType(Enum):
@@ -220,6 +244,8 @@ def clean_text(text: str) -> str:
     text = text.strip()
     # Remove spaces between CJK characters (OCR artifacts)
     text = remove_cjk_spaces(text)
+    # Normalize arithmetic multiplication before redaction marker detection.
+    text = normalize_multiplication_symbols(text)
     # Normalize repeated redaction placeholders to template form
     text = normalize_redaction_markers(text)
     
@@ -282,12 +308,14 @@ def is_date_text(text: str) -> bool:
         "二〇二四年九月二十八日" -> True
         "2024年9月28日" -> True
     """
+    cleaned = strip_signature_leading_junk(text)
+
     # Chinese numerals date pattern
     chinese_pattern = r'[〇一二三四五六七八九零]+年[一二三四五六七八九十]+月[一二三四五六七八九十]+日'
     # Arabic numerals date pattern
     arabic_pattern = r'\d{4}年\d{1,2}月\d{1,2}日'
     
-    return bool(re.search(chinese_pattern, text)) or bool(re.search(arabic_pattern, text))
+    return bool(re.fullmatch(chinese_pattern, cleaned)) or bool(re.fullmatch(arabic_pattern, cleaned))
 
 
 def is_signature_text(text: str) -> bool:
@@ -315,10 +343,10 @@ def is_signature_text(text: str) -> bool:
         r'(?:代\s*理\s*)?打\s*印\s*(?:责\s*任\s*)?人',
     ]
     
-    cleaned = clean_text(text)
+    cleaned = strip_signature_leading_junk(clean_text(text))
     
     for pattern in signature_patterns:
-        if re.search(pattern, cleaned):
+        if re.match(pattern, cleaned):
             return True
     
     return False
@@ -365,8 +393,9 @@ def parse_div_block(div: Tag) -> ContentBlock:
     # Right-aligned -> Doc ID, Signature, or Date
     if align == 'right':
         # Check if it's a case number (starts with （ or ( and contains 号)
-        if (text.startswith('（') or text.startswith('(')) and '号' in text:
-            return ContentBlock(BlockType.DOC_ID, text, raw_html)
+        case_text = strip_signature_leading_junk(text)
+        if (case_text.startswith('（') or case_text.startswith('(')) and '号' in case_text:
+            return ContentBlock(BlockType.DOC_ID, case_text, raw_html)
         
         # Check if it's a date
         if is_date_text(text):
@@ -377,6 +406,13 @@ def parse_div_block(div: Tag) -> ContentBlock:
             return ContentBlock(BlockType.SIGNATURE, text, raw_html)
         
         # Other right-aligned content (could be part of signature)
+        return ContentBlock(BlockType.SIGNATURE, text, raw_html)
+
+    # Some sources encode signature/date lines with indentation plus OCR dots
+    # instead of right alignment. Treat only standalone-looking lines this way.
+    if is_date_text(text):
+        return ContentBlock(BlockType.DATE, text, raw_html)
+    if is_signature_text(text):
         return ContentBlock(BlockType.SIGNATURE, text, raw_html)
     
     # Default: Paragraph (check for indentation)
@@ -519,6 +555,7 @@ def normalize_html(html_content: str) -> ParsedDocument:
     
     for i, block in enumerate(all_blocks):
         if in_header:
+            handled_header_block = True
             if block.block_type == BlockType.TITLE:
                 # Court name: no spaces should exist at all
                 doc.court_name = block.text.replace(" ", "")
@@ -531,7 +568,18 @@ def normalize_html(html_content: str) -> ParsedDocument:
                 in_header = False
                 in_body = True
                 body_start_idx = i + 1
-        elif in_body:
+            else:
+                handled_header_block = False
+
+            if handled_header_block:
+                continue
+
+            if doc.court_name or doc.doc_type or doc.doc_id:
+                in_header = False
+                in_body = True
+                body_start_idx = i
+
+        if in_body:
             # Check if we've hit the signature section
             # Signature section starts with right-aligned content (signatures) that isn't a doc ID
             if block.block_type in (BlockType.SIGNATURE, BlockType.DATE):

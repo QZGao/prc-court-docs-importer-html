@@ -8,6 +8,7 @@ Rate limiting is handled by pywikibot's built-in throttle.
 import json
 import logging
 import re
+import difflib
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from .mediawiki import (
     resolve_pages_batch,
     save_page,
 )
+from . import conflict_resolution as conflict_resolution_module
 from .conflict_resolution import (
     is_conflict_resolvable,
     try_resolve_conflict,
@@ -36,8 +38,11 @@ from .overwrite_quality import (
     canonicalize_redaction_markers,
     content_link_count,
     contains_os_redaction,
+    formatting_regression_penalty,
     is_safe_header_only_update,
+    is_safe_formatting_improvement,
     is_safe_redaction_marker_update,
+    is_safe_signature_structure_improvement,
     normalize_existing_header_safe_fixes,
     structural_regression_penalty,
 )
@@ -79,6 +84,16 @@ class UploadResult:
     wikitext: Optional[str] = None  # Included for overwritable entries
 
 
+@dataclass
+class _TrackedWikiWrite:
+    """A save/move that verbose and dry-run modes can report."""
+    title: str
+    before: Optional[str]
+    after: str
+    summary: str
+    action: str = "save"
+
+
 def build_edit_summary(wenshu_id: str) -> str:
     """Build a standardized edit summary."""
     # return f"Imported from 裁判文书网 (credit: caseopen.org), source: https://wenshu.court.gov.cn/website/wenshu/181107ANFZ0BXSK4/index.html?docId={wenshu_id}"
@@ -108,6 +123,68 @@ def _append_message(message: str, extra: str) -> str:
 def _build_progress_description(action: str, uploaded: int, failed: int, skipped: int) -> str:
     """Build a consistent rich progress description for upload batches."""
     return f"[cyan]{action}: {uploaded} ✓, {failed} ✗, {skipped} ⊘"
+
+
+def _normalize_diff_text(content: Optional[str]) -> str:
+    if content is None:
+        return ""
+    return content.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+
+
+def _format_wikitext_diff(write: _TrackedWikiWrite) -> str:
+    """Return a unified diff for one tracked write."""
+    before_text = _normalize_diff_text(write.before)
+    after_text = _normalize_diff_text(write.after)
+    if before_text == after_text:
+        return ""
+
+    before_label = f"{write.title} (existing)" if write.before is not None else f"{write.title} (new)"
+    after_label = f"{write.title} ({write.action})"
+    return "\n".join(
+        difflib.unified_diff(
+            before_text.splitlines(),
+            after_text.splitlines(),
+            fromfile=before_label,
+            tofile=after_label,
+            lineterm="",
+        )
+    )
+
+
+def _emit_verbose_result(
+    *,
+    line_num: int,
+    result: UploadResult,
+    writes: list[_TrackedWikiWrite],
+    dry_run: bool,
+) -> None:
+    """Print one document's decision and any tracked wikitext diffs."""
+    prefix = "DRY RUN " if dry_run else ""
+    target_title = result.final_title or result.title
+    console.print(
+        f"{prefix}line {line_num}: {result.status} [[{target_title}]] "
+        f"(wenshu_id={result.wenshu_id})",
+        markup=False,
+    )
+    if result.case_title:
+        console.print(f"  case_title: [[{result.case_title}]]", markup=False)
+    if result.message:
+        console.print(f"  message: {result.message}", markup=False)
+
+    if not writes:
+        console.print("  wikitext diff: (no page write)", markup=False)
+        return
+
+    for write in writes:
+        verb = "would save" if dry_run and write.action == "save" else write.action
+        console.print(f"  {verb}: [[{write.title}]]", markup=False)
+        if write.summary:
+            console.print(f"  summary: {write.summary}", markup=False)
+        diff_text = _format_wikitext_diff(write)
+        if diff_text:
+            console.print(diff_text, markup=False)
+        else:
+            console.print("  wikitext diff: (no change)", markup=False)
 
 
 def _is_header_landing_page(page_state) -> bool:
@@ -334,7 +411,9 @@ def _hide_overwrite_revision_for_review(
 
     if (
         is_safe_header_only_update(import_text, existing_for_decision)
+        or is_safe_formatting_improvement(import_text, existing_for_decision)
         or is_safe_redaction_marker_update(import_text, existing_for_decision)
+        or is_safe_signature_structure_improvement(import_text, existing_for_decision)
     ):
         try:
             save_page(target_title, import_wikitext, build_edit_summary(wenshu_id))
@@ -363,6 +442,8 @@ def _hide_overwrite_revision_for_review(
     import_redaction_penalty = body_redaction_penalty(import_text)
     existing_structural_penalty = structural_regression_penalty(existing_for_decision)
     import_structural_penalty = structural_regression_penalty(import_text)
+    existing_formatting_penalty = formatting_regression_penalty(existing_for_decision)
+    import_formatting_penalty = formatting_regression_penalty(import_text)
     redaction_canon_matches = (
         canonicalize_redaction_markers(existing_for_decision)
         == canonicalize_redaction_markers(import_text)
@@ -414,6 +495,31 @@ def _hide_overwrite_revision_for_review(
             message=message,
             timestamp=timestamp,
             reason="Skipped structurally worse import",
+        )
+
+    if (
+        import_formatting_penalty > existing_formatting_penalty
+        and import_redaction_penalty >= existing_redaction_penalty
+    ):
+        if existing_changed_safely:
+            return _save_safe_existing_update(
+                source_title=source_title,
+                target_title=target_title,
+                wenshu_id=wenshu_id,
+                content=existing_for_decision,
+                case_title=case_title,
+                message=message,
+                timestamp=timestamp,
+                reason="Skipped formatting-regressed import and saved existing-page metadata normalization",
+            )
+        return _build_no_overwrite_result(
+            source_title=source_title,
+            target_title=target_title,
+            wenshu_id=wenshu_id,
+            case_title=case_title,
+            message=message,
+            timestamp=timestamp,
+            reason="Skipped formatting-regressed import",
         )
 
     if contains_os_redaction(existing_content):
@@ -826,6 +932,8 @@ def _process_prefetched_upload_batch(
     overwritable_f,
     resolve_conflicts: bool,
     force_overwrite: bool,
+    dry_run: bool = False,
+    verbose: bool = False,
 ) -> Tuple[int, int, int, int, int]:
     """Process one upload chunk using batched read-side page queries."""
     uploaded_count = 0
@@ -837,6 +945,9 @@ def _process_prefetched_upload_batch(
     title_pages: dict[str, PageSnapshot] = {}
     case_pages = {}
     mutated_titles: set[str] = set()
+    tracked_page_texts: dict[str, Optional[str]] = {}
+    tracked_writes: list[_TrackedWikiWrite] = []
+    track_writes = dry_run or verbose
 
     try:
         title_pages = fetch_page_content_batch(
@@ -845,6 +956,11 @@ def _process_prefetched_upload_batch(
         )
     except Exception as exc:
         logging.warning("Falling back to per-title reads after batch title query failure: %s", exc)
+
+    for requested_title, page in title_pages.items():
+        tracked_page_texts[requested_title] = page.content if page.exists else None
+        if page.canonical_title:
+            tracked_page_texts[page.canonical_title] = page.content if page.exists else None
 
     case_titles = [doc["case_title"] for doc in batch_docs if doc.get("case_title")]
     if case_titles:
@@ -856,48 +972,143 @@ def _process_prefetched_upload_batch(
         except Exception as exc:
             logging.warning("Falling back to per-title reads after batch case-title query failure: %s", exc)
 
-    for doc in batch_docs:
-        existing_page = None if doc["title"] in mutated_titles else title_pages.get(doc["title"])
-        case_page = None
-        if doc.get("case_title"):
-            case_page = None if doc["case_title"] in mutated_titles else case_pages.get(doc["case_title"])
+    for requested_title, page in case_pages.items():
+        tracked_page_texts[requested_title] = page.content if page.exists else None
+        if page.resolved_title:
+            tracked_page_texts[page.resolved_title] = page.content if page.exists else None
 
-        result = upload_document(
-            title=doc["title"],
-            wenshu_id=doc["wenshu_id"],
-            wikitext=doc["wikitext"],
-            resolve_conflicts=resolve_conflicts,
-            force_overwrite=force_overwrite,
-            existing_page=existing_page,
-            case_page=case_page,
+    original_save_page = save_page
+    original_conflict_save_page = conflict_resolution_module.save_page
+    original_conflict_move_page = conflict_resolution_module.move_page
+
+    def get_before_text(title: str) -> Optional[str]:
+        if title in tracked_page_texts:
+            return tracked_page_texts[title]
+        try:
+            exists, content = get_page_content(title)
+        except Exception:
+            tracked_page_texts[title] = None
+            return None
+        tracked_page_texts[title] = content if exists else None
+        return tracked_page_texts[title]
+
+    def make_tracked_save(real_save_page):
+        def tracked_save_page(title: str, content: str, summary: str, *args, **kwargs):
+            before = get_before_text(title)
+            tracked_writes.append(
+                _TrackedWikiWrite(
+                    title=title,
+                    before=before,
+                    after=content,
+                    summary=summary,
+                )
+            )
+            tracked_page_texts[title] = content
+            if dry_run:
+                return True
+            return real_save_page(title, content, summary, *args, **kwargs)
+
+        return tracked_save_page
+
+    def tracked_move_page(
+        from_title: str,
+        to_title: str,
+        reason: str = "",
+        leave_redirect: bool = True,
+        ignore_warnings: bool = False,
+    ) -> bool:
+        before_from = get_before_text(from_title)
+        before_to = get_before_text(to_title)
+        moved_text = before_from or ""
+        tracked_writes.append(
+            _TrackedWikiWrite(
+                title=to_title,
+                before=before_to,
+                after=moved_text,
+                summary=reason,
+                action=f"move from {from_title}",
+            )
+        )
+        tracked_page_texts[to_title] = moved_text
+        if leave_redirect:
+            tracked_page_texts[from_title] = build_case_redirect_text(to_title)
+        else:
+            tracked_page_texts[from_title] = None
+        if dry_run:
+            return True
+        return original_conflict_move_page(
+            from_title,
+            to_title,
+            reason=reason,
+            leave_redirect=leave_redirect,
+            ignore_warnings=ignore_warnings,
         )
 
-        result_dict = asdict(result)
+    if track_writes:
+        globals()["save_page"] = make_tracked_save(original_save_page)
+        conflict_resolution_module.save_page = make_tracked_save(original_conflict_save_page)
+        conflict_resolution_module.move_page = tracked_move_page
 
-        if result.status in {'uploaded', 'reverted_overwrite'}:
-            uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-            uploaded_count += 1
-        elif result.status == 'conflict_resolved':
-            uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-            resolved_count += 1
-        elif result.status == 'skipped':
-            skipped_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-            skipped_count += 1
-        elif result.status == 'overwritable':
-            overwritable_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-            overwritable_count += 1
-        else:
-            failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
-            failed_count += 1
+    try:
+        for doc in batch_docs:
+            existing_page = None if doc["title"] in mutated_titles else title_pages.get(doc["title"])
+            case_page = None
+            if doc.get("case_title"):
+                case_page = None if doc["case_title"] in mutated_titles else case_pages.get(doc["case_title"])
 
-        if result.status in {'uploaded', 'conflict_resolved', 'reverted_overwrite'} or result.redirect_status in {'created', 'updated'}:
-            for touched_title in (
-                doc["title"],
-                result.final_title,
-                result.case_title,
-            ):
-                if touched_title:
-                    mutated_titles.add(touched_title)
+            write_start = len(tracked_writes)
+            result = upload_document(
+                title=doc["title"],
+                wenshu_id=doc["wenshu_id"],
+                wikitext=doc["wikitext"],
+                resolve_conflicts=resolve_conflicts,
+                force_overwrite=force_overwrite,
+                existing_page=existing_page,
+                case_page=case_page,
+            )
+            doc_writes = tracked_writes[write_start:]
+
+            result_dict = asdict(result)
+            if dry_run:
+                result_dict["dry_run"] = True
+
+            if result.status in {'uploaded', 'reverted_overwrite'}:
+                uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                uploaded_count += 1
+            elif result.status == 'conflict_resolved':
+                uploaded_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                resolved_count += 1
+            elif result.status == 'skipped':
+                skipped_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                skipped_count += 1
+            elif result.status == 'overwritable':
+                overwritable_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                overwritable_count += 1
+            else:
+                failed_f.write(json.dumps(result_dict, ensure_ascii=False) + '\n')
+                failed_count += 1
+
+            if verbose:
+                _emit_verbose_result(
+                    line_num=doc["line_num"],
+                    result=result,
+                    writes=doc_writes,
+                    dry_run=dry_run,
+                )
+
+            if result.status in {'uploaded', 'conflict_resolved', 'reverted_overwrite'} or result.redirect_status in {'created', 'updated'}:
+                for touched_title in (
+                    doc["title"],
+                    result.final_title,
+                    result.case_title,
+                ):
+                    if touched_title:
+                        mutated_titles.add(touched_title)
+    finally:
+        if track_writes:
+            globals()["save_page"] = original_save_page
+            conflict_resolution_module.save_page = original_conflict_save_page
+            conflict_resolution_module.move_page = original_conflict_move_page
 
     return uploaded_count, failed_count, skipped_count, resolved_count, overwritable_count
 
@@ -912,6 +1123,8 @@ def process_upload_batch(
     force_overwrite: bool = False,
     max_documents: Optional[int] = None,
     skip_lines: int = 0,
+    dry_run: bool = False,
+    verbose: bool = False,
 ) -> Tuple[int, int, int, int, int]:
     """
     Process a batch of documents for upload.
@@ -926,8 +1139,11 @@ def process_upload_batch(
         skipped_log: Path to log skipped pages
         overwritable_log: Path to log pages that could be overwritten (JSONL with wikitext)
         resolve_conflicts: Whether to attempt conflict resolution
+        force_overwrite: Whether to force-overwrite existing pages
         max_documents: Maximum number of documents to process (None = all)
         skip_lines: Number of leading source lines to skip before processing
+        dry_run: Simulate writes without editing the wiki
+        verbose: Print per-document decisions and wikitext diffs
 
     Returns:
         Tuple of (uploaded_count, failed_count, skipped_count, resolved_count, overwritable_count)
@@ -1079,6 +1295,8 @@ def process_upload_batch(
                         overwritable_f=overwritable_f,
                         resolve_conflicts=resolve_conflicts,
                         force_overwrite=force_overwrite,
+                        dry_run=dry_run,
+                        verbose=verbose,
                     )
                     uploaded_count += batch_uploaded
                     failed_count += batch_failed
@@ -1108,6 +1326,8 @@ def process_upload_batch(
                     overwritable_f=overwritable_f,
                     resolve_conflicts=resolve_conflicts,
                     force_overwrite=force_overwrite,
+                    dry_run=dry_run,
+                    verbose=verbose,
                 )
                 uploaded_count += batch_uploaded
                 failed_count += batch_failed

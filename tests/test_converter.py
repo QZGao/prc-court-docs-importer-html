@@ -262,6 +262,7 @@ class TestSignatureDetection:
     def test_clerk_signature(self):
         assert is_signature_text("书记员　　魏凯")
         assert is_signature_text("书 记 员　曹　文")
+        assert is_signature_text("........书记员刘敏")
     
     def test_assistant_signature(self):
         assert is_signature_text("法官助理　孙雨薇")
@@ -283,6 +284,10 @@ class TestSignatureDetection:
     def test_not_signature(self):
         assert not is_signature_text("本裁定送达后即发生法律效力")
         assert not is_signature_text("终结本次执行程序")
+        assert not is_signature_text("本院于2021年4月13日由审判员周小兵担任审判长，依法公开开庭审理。")
+
+    def test_dotted_date(self):
+        assert is_date_text(".二〇二一年十二月七日")
 
 
 class TestLocationInference:
@@ -334,6 +339,15 @@ class TestHtmlNormalization:
         # Find the body paragraph
         body_texts = [b.text for b in doc.body_blocks]
         assert any("正文" in t for t in body_texts)
+
+    def test_clean_text_normalizes_numeric_multiplication_without_redaction(self):
+        text = "赔偿3,459.60元（4,942.28元ｘ70%），物业费2.3元/月.平方米*163.64平方米*48个月，张三*。"
+
+        result = clean_text(text)
+
+        assert "4,942.28元×70%" in result
+        assert "2.3元/月.平方米×163.64平方米×48个月" in result
+        assert "张三{{PRC-redact|1}}。" in result
 
 
 class TestDocTypeExtraction:
@@ -491,6 +505,148 @@ class TestWikitextRendering:
 
         assert "{{裁判文书署名|1=" in wikitext
         assert "审判员：张三" in wikitext
+
+    def test_dotted_unaligned_signature_lines_are_extracted(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>四川省遂宁市船山区人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>刑事判决书</div>
+        <div style='TEXT-ALIGN: right;'>（2021）川0903刑初554号</div>
+        <div style='TEXT-INDENT: 30pt;'>如不服本判决，可在接到判决书的第二日起十日内提出上诉。</div>
+        <div style='TEXT-INDENT: 30pt;'>.审判长樊平</div>
+        <div style='TEXT-INDENT: 30pt;'>.人民陪审员曾长清</div>
+        <div style='TEXT-INDENT: 30pt;'>...人民陪审员王亚君</div>
+        <div style='TEXT-INDENT: 30pt;'>..二〇二一年十一月三十日</div>
+        <div style='TEXT-INDENT: 30pt;'>........书记员刘敏</div>
+        <div style='TEXT-INDENT: 30pt;'>附：本案适用的相关法律条文</div>
+        """
+
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "审判长：樊平" in wikitext
+        assert "人民陪审员：曾长清" in wikitext
+        assert "人民陪审员：王亚君" in wikitext
+        assert "二〇二一年十一月三十日" in wikitext
+        assert "书记员：刘敏" in wikitext
+        assert ".审判长" not in wikitext
+        assert "{{裁判文书署名|1=\n}}\n" not in wikitext
+        assert "{{gap}}附：本案适用的相关法律条文" in wikitext
+
+    def test_signature_detection_starts_without_visible_case_number(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>四川省遂宁市船山区人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>刑事判决书</div>
+        <div style='TEXT-INDENT: 30pt;'>如不服本判决，可在接到判决书的第二日起十日内提出上诉。</div>
+        <div style='TEXT-INDENT: 30pt;'>.审判员樊平</div>
+        <div style='TEXT-INDENT: 30pt;'>.二〇二一年十二月七日</div>
+        <div style='TEXT-INDENT: 30pt;'>书记员刘敏</div>
+        <div style='TEXT-INDENT: 30pt;'>附：本案适用的相关法律条文</div>
+        """
+
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "审判员：樊平" in wikitext
+        assert "书记员：刘敏" in wikitext
+        assert "{{gap}}.审判员樊平" not in wikitext
+        assert "{{gap}}附：本案适用的相关法律条文" in wikitext
+
+    def test_dotted_right_aligned_case_number_is_not_signature_start(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>四川省遂宁市船山区人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>刑事判决书</div>
+        <div style='TEXT-ALIGN: right;'>..（2021）川0903刑初554号</div>
+        <div style='TEXT-INDENT: 30pt;'>公诉机关遂宁市船山区人民检察院。</div>
+        <div style='TEXT-INDENT: 30pt;'>如不服本判决，可在接到判决书的第二日起十日内提出上诉。</div>
+        <div style='TEXT-INDENT: 30pt;'>.审判员樊平</div>
+        <div style='TEXT-INDENT: 30pt;'>.二〇二一年十二月七日</div>
+        <div style='TEXT-INDENT: 30pt;'>书记员刘敏</div>
+        """
+
+        doc = normalize_html(html)
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert doc.doc_id == "（2021）川0903刑初554号"
+        assert "{{gap}}公诉机关遂宁市船山区人民检察院。" in wikitext
+        assert "审判员：樊平" in wikitext
+        assert "（2021）川0903刑初554号\n公诉机关" not in wikitext
+
+    def test_merged_signature_roles_are_split(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>内蒙古自治区准格尔旗人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>民事判决书</div>
+        <div style='TEXT-ALIGN: right;'>（2021）内0622民初43号</div>
+        <div style='TEXT-INDENT: 30pt;'>如不服本判决，可以上诉。</div>
+        <div style='TEXT-ALIGN: right;'>审 判 员　　张　　 悦　　 蓉</div>
+        <div style='TEXT-ALIGN: right;'>二〇二一年三月二十九日</div>
+        <div style='TEXT-ALIGN: right;'>法官助理　　陈彦儒书记员云耀</div>
+        """
+
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "审判员：张悦蓉" in wikitext
+        assert "法官助理：陈彦儒" in wikitext
+        assert "书记员：云耀" in wikitext
+        assert "陈彦儒书记员云耀" not in wikitext
+
+    def test_body_renderer_merges_obvious_line_wrapped_paragraphs(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>安徽省阜南县人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>民事判决书</div>
+        <div style='TEXT-ALIGN: right;'>（2018）皖1225民初6139号</div>
+        <div style='TEXT-INDENT: 30pt;'>第二百零六条借款人应当按照约定的期限返还借款。贷款</div>
+        <div style='TEXT-INDENT: 30pt;'>人可以催告借款人在合理期限内返还。</div>
+        <div style='TEXT-ALIGN: right;'>审判员　张三</div>
+        """
+
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "{{gap}}第二百零六条借款人应当按照约定的期限返还借款。贷款人可以催告借款人在合理期限内返还。" in wikitext
+        assert "贷款\n\n{{gap}}人" not in wikitext
+
+    def test_body_renderer_keeps_party_labels_separate_when_previous_line_lacks_punctuation(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>内蒙古自治区赤峰市松山区人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>民事判决书</div>
+        <div style='TEXT-ALIGN: right;'>（2022）内0404民初4954号</div>
+        <div style='TEXT-INDENT: 30pt;'>被告：赤峰励为建筑劳务有限公司。住所地：内蒙古自治区赤峰市松山区</div>
+        <div style='TEXT-INDENT: 30pt;'>法定代表人：朱云明，经理。</div>
+        <div style='TEXT-ALIGN: right;'>审判员　张三</div>
+        """
+
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "{{gap}}被告：赤峰励为建筑劳务有限公司。住所地：内蒙古自治区赤峰市松山区\n\n{{gap}}法定代表人：朱云明，经理。" in wikitext
+        assert "松山区法定代表人" not in wikitext
+
+    def test_further_notes_renderer_merges_obvious_line_wrapped_paragraphs(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>安徽省阜南县人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>民事判决书</div>
+        <div style='TEXT-ALIGN: right;'>（2018）皖1225民初6139号</div>
+        <div style='TEXT-INDENT: 30pt;'>正文。</div>
+        <div style='TEXT-ALIGN: right;'>二〇一八年十一月十九日</div>
+        <div style='TEXT-INDENT: 30pt;'>第二百零六条借款人应当按照约定的期限返还借款。贷款</div>
+        <div style='TEXT-INDENT: 30pt;'>人可以催告借款人在合理期限内返还。</div>
+        """
+
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "{{gap}}第二百零六条借款人应当按照约定的期限返还借款。贷款人可以催告借款人在合理期限内返还。" in wikitext
+        assert "贷款\n\n{{gap}}人" not in wikitext
+
+    def test_body_renderer_indents_unstyled_colon_heading(self):
+        html = """
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>四川省筠连县人民法院</div>
+        <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>刑事判决书</div>
+        <div style='TEXT-ALIGN: right;'>（2021）川1527刑初145号</div>
+        <div>筠连县人民检察院指控：</div>
+        <div style='TEXT-INDENT: 30pt;'>被告人潘某实施犯罪。</div>
+        <div style='TEXT-ALIGN: right;'>审判员　张三</div>
+        """
+
+        wikitext = convert_html_to_wikitext(html, "测试标题")
+
+        assert "{{gap}}筠连县人民检察院指控：" in wikitext
+        assert "\n筠连县人民检察院指控：" not in wikitext
 
     def test_convert_document_redaction_normalizes_title_and_body(self):
         raw_json = {
