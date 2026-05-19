@@ -16,8 +16,6 @@ from typing import Optional, Tuple
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn, SpinnerColumn
 from rich.console import Console
 
-from convert.html_normalizer import normalize_redaction_markers
-
 from .mediawiki import (
     DEFAULT_READ_BATCH_SIZE,
     PageSnapshot,
@@ -32,6 +30,16 @@ from .conflict_resolution import (
     is_conflict_resolvable,
     try_resolve_conflict,
     update_draft_for_conflict_resolution,
+)
+from .overwrite_quality import (
+    body_redaction_penalty,
+    canonicalize_redaction_markers,
+    content_link_count,
+    contains_os_redaction,
+    is_safe_header_only_update,
+    is_safe_redaction_marker_update,
+    normalize_existing_header_safe_fixes,
+    structural_regression_penalty,
 )
 from .page_metadata import (
     build_case_redirect_summary,
@@ -50,9 +58,6 @@ UNCHECKED_OVERWRITE_CATEGORY_RE = re.compile(
     rf"\[\[\s*(?:Category|分类|分類)\s*:\s*{re.escape(UNCHECKED_OVERWRITE_CATEGORY)}(?:\|[^\]\n]*)?\]\]",
     re.IGNORECASE,
 )
-OS_REDACTION_RE = re.compile(r"\{\{PRC-redact\|\d+\|os=yes\}\}")
-HEADER_TEMPLATE_START_RE = re.compile(r"^\s*\{\{\s*header/裁判文书\b", re.IGNORECASE)
-HEADER_PARAM_LINE_RE = re.compile(r"^(\s*\|\s*)([^=|\n]+?)(\s*=\s*)(.*?)(\s*)$")
 
 
 def utc_now_iso() -> str:
@@ -85,11 +90,6 @@ def build_manual_revert_summary(wenshu_id: str) -> str:
     return "回退覆盖导入版本并标记待检查"
 
 
-def _contains_os_redaction(content: str) -> bool:
-    """Return whether the existing page has an os=yes redaction template."""
-    return bool(OS_REDACTION_RE.search(content or ""))
-
-
 def _add_unchecked_overwrite_category(content: str) -> str:
     """Append the unchecked-overwrite review category to existing content."""
     if UNCHECKED_OVERWRITE_CATEGORY_RE.search(content or ""):
@@ -113,101 +113,6 @@ def _build_progress_description(action: str, uploaded: int, failed: int, skipped
 def _is_header_landing_page(page_state) -> bool:
     """Return whether a resolved page lands on a real court-document page."""
     return bool(page_state and page_state.exists and page_state.content and is_header_page(page_state.content))
-
-
-def _find_header_template_span(lines: list[str]) -> Optional[tuple[int, int]]:
-    """Return the start/end line indexes for a simple multiline court header."""
-    for start_index, line in enumerate(lines):
-        if not HEADER_TEMPLATE_START_RE.match(line):
-            continue
-        for end_index in range(start_index + 1, len(lines)):
-            if lines[end_index].strip() == "}}":
-                return start_index, end_index
-        return None
-    return None
-
-
-def _split_header_param_lines(lines: list[str]) -> Optional[tuple[list[tuple], list[tuple[str, str]]]]:
-    """Return a header skeleton and ordered parameter values."""
-    skeleton: list[tuple] = []
-    values: list[tuple[str, str]] = []
-
-    for line in lines:
-        match = HEADER_PARAM_LINE_RE.match(line)
-        if not match:
-            skeleton.append(("text", line))
-            continue
-
-        key = match.group(2).strip()
-        skeleton.append(("param", match.group(1), key, match.group(3), match.group(5)))
-        values.append((key, match.group(4)))
-
-    return skeleton, values
-
-
-def _normalize_case_number_brackets(value: str) -> str:
-    return re.sub(r"\s+", "", value or "").replace("(", "（").replace(")", "）")
-
-
-def _is_safe_header_param_update(key: str, existing_value: str, import_value: str) -> bool:
-    if existing_value == import_value:
-        return True
-
-    if not existing_value.strip() and import_value.strip():
-        return True
-
-    if key == "案号":
-        return _normalize_case_number_brackets(existing_value) == _normalize_case_number_brackets(import_value)
-
-    return False
-
-
-def _is_safe_header_only_update(import_wikitext: str, existing_content: str) -> bool:
-    """Return whether the import only fills header params or normalizes 案号 brackets."""
-    existing_text = normalize_wikitext_for_comparison(existing_content)
-    import_text = normalize_wikitext_for_comparison(import_wikitext)
-    if existing_text == import_text:
-        return False
-
-    existing_lines = existing_text.split("\n")
-    import_lines = import_text.split("\n")
-    existing_span = _find_header_template_span(existing_lines)
-    import_span = _find_header_template_span(import_lines)
-    if not existing_span or not import_span:
-        return False
-
-    existing_start, existing_end = existing_span
-    import_start, import_end = import_span
-    if existing_lines[:existing_start] != import_lines[:import_start]:
-        return False
-    if existing_lines[existing_end + 1 :] != import_lines[import_end + 1 :]:
-        return False
-
-    existing_skeleton, existing_values = _split_header_param_lines(existing_lines[existing_start : existing_end + 1])
-    import_skeleton, import_values = _split_header_param_lines(import_lines[import_start : import_end + 1])
-    if existing_skeleton != import_skeleton or len(existing_values) != len(import_values):
-        return False
-
-    changed = False
-    for (existing_key, existing_value), (import_key, import_value) in zip(existing_values, import_values):
-        if existing_key != import_key:
-            return False
-        if existing_value != import_value:
-            changed = True
-        if not _is_safe_header_param_update(existing_key, existing_value, import_value):
-            return False
-
-    return changed
-
-
-def _is_safe_redaction_marker_update(import_wikitext: str, existing_content: str) -> bool:
-    """Return whether the import only normalizes redaction marker runs to templates."""
-    existing_text = normalize_wikitext_for_comparison(existing_content)
-    import_text = normalize_wikitext_for_comparison(import_wikitext)
-    if existing_text == import_text:
-        return False
-
-    return normalize_redaction_markers(existing_text) == normalize_redaction_markers(import_text)
 
 
 def ensure_case_number_redirect(
@@ -316,6 +221,63 @@ def _build_overwritable_result(
     )
 
 
+def _save_safe_existing_update(
+    *,
+    source_title: str,
+    target_title: str,
+    wenshu_id: str,
+    content: str,
+    case_title: Optional[str],
+    message: str,
+    timestamp: str,
+    reason: str,
+) -> UploadResult:
+    try:
+        save_page(target_title, content, build_edit_summary(wenshu_id))
+    except Exception as e:
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='failed',
+            final_title=target_title,
+            case_title=case_title,
+            message=f"Failed to save safe existing-page update: {e}",
+            timestamp=timestamp,
+        )
+
+    return UploadResult(
+        title=source_title,
+        wenshu_id=wenshu_id,
+        status='uploaded',
+        final_title=target_title,
+        case_title=case_title,
+        message=_append_message(message, reason),
+        timestamp=timestamp,
+    )
+
+
+def _build_no_overwrite_result(
+    *,
+    source_title: str,
+    target_title: str,
+    wenshu_id: str,
+    case_title: Optional[str],
+    message: str,
+    timestamp: str,
+    reason: str,
+) -> UploadResult:
+    return UploadResult(
+        title=source_title,
+        wenshu_id=wenshu_id,
+        status='skipped',
+        final_title=target_title,
+        case_title=case_title,
+        redirect_status='existing',
+        message=_append_message(message, reason),
+        timestamp=timestamp,
+    )
+
+
 def _hide_overwrite_revision_for_review(
     *,
     source_title: str,
@@ -344,9 +306,35 @@ def _hide_overwrite_revision_for_review(
             timestamp=timestamp,
         )
 
+    existing_for_decision = normalize_existing_header_safe_fixes(existing_content)
+    existing_changed_safely = not wikitexts_match(existing_for_decision, existing_content)
+    import_text = normalize_wikitext_for_comparison(import_wikitext)
+
+    if wikitexts_match(import_text, existing_for_decision):
+        if existing_changed_safely:
+            return _save_safe_existing_update(
+                source_title=source_title,
+                target_title=target_title,
+                wenshu_id=wenshu_id,
+                content=existing_for_decision,
+                case_title=case_title,
+                message=message,
+                timestamp=timestamp,
+                reason="Saved existing-page metadata normalization without overwrite",
+            )
+        return _build_no_overwrite_result(
+            source_title=source_title,
+            target_title=target_title,
+            wenshu_id=wenshu_id,
+            case_title=case_title,
+            message=message,
+            timestamp=timestamp,
+            reason="Import matches existing page after safe normalization",
+        )
+
     if (
-        _is_safe_header_only_update(import_wikitext, existing_content)
-        or _is_safe_redaction_marker_update(import_wikitext, existing_content)
+        is_safe_header_only_update(import_text, existing_for_decision)
+        or is_safe_redaction_marker_update(import_text, existing_for_decision)
     ):
         try:
             save_page(target_title, import_wikitext, build_edit_summary(wenshu_id))
@@ -371,7 +359,64 @@ def _hide_overwrite_revision_for_review(
             timestamp=timestamp,
         )
 
-    if _contains_os_redaction(existing_content):
+    existing_redaction_penalty = body_redaction_penalty(existing_for_decision)
+    import_redaction_penalty = body_redaction_penalty(import_text)
+    existing_structural_penalty = structural_regression_penalty(existing_for_decision)
+    import_structural_penalty = structural_regression_penalty(import_text)
+    redaction_canon_matches = (
+        canonicalize_redaction_markers(existing_for_decision)
+        == canonicalize_redaction_markers(import_text)
+    )
+    import_loses_links = content_link_count(import_text) < content_link_count(existing_for_decision)
+
+    if redaction_canon_matches and import_redaction_penalty > existing_redaction_penalty:
+        if existing_changed_safely:
+            return _save_safe_existing_update(
+                source_title=source_title,
+                target_title=target_title,
+                wenshu_id=wenshu_id,
+                content=existing_for_decision,
+                case_title=case_title,
+                message=message,
+                timestamp=timestamp,
+                reason="Skipped worse redaction formatting and saved existing-page metadata normalization",
+            )
+        return _build_no_overwrite_result(
+            source_title=source_title,
+            target_title=target_title,
+            wenshu_id=wenshu_id,
+            case_title=case_title,
+            message=message,
+            timestamp=timestamp,
+            reason="Skipped worse redaction formatting",
+        )
+
+    if (
+        import_structural_penalty > existing_structural_penalty
+        and import_redaction_penalty >= existing_redaction_penalty
+    ) or (import_loses_links and import_redaction_penalty >= existing_redaction_penalty):
+        if existing_changed_safely:
+            return _save_safe_existing_update(
+                source_title=source_title,
+                target_title=target_title,
+                wenshu_id=wenshu_id,
+                content=existing_for_decision,
+                case_title=case_title,
+                message=message,
+                timestamp=timestamp,
+                reason="Skipped structurally worse import and saved existing-page metadata normalization",
+            )
+        return _build_no_overwrite_result(
+            source_title=source_title,
+            target_title=target_title,
+            wenshu_id=wenshu_id,
+            case_title=case_title,
+            message=message,
+            timestamp=timestamp,
+            reason="Skipped structurally worse import",
+        )
+
+    if contains_os_redaction(existing_content):
         return _build_overwritable_result(
             source_title=source_title,
             target_title=target_title,
@@ -398,7 +443,7 @@ def _hide_overwrite_revision_for_review(
     try:
         save_page(
             target_title,
-            _add_unchecked_overwrite_category(existing_content),
+            _add_unchecked_overwrite_category(existing_for_decision),
             build_manual_revert_summary(wenshu_id),
         )
     except Exception as e:
