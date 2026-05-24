@@ -4,7 +4,7 @@ import re
 from typing import Optional
 
 from convert.html_normalizer import (
-    REDACTION_SEQUENCE_PATTERN,
+    find_redaction_marker_runs,
     is_date_text,
     normalize_redaction_markers,
     strip_signature_leading_junk,
@@ -30,8 +30,7 @@ MERGED_SIGNATURE_ROLE_RE = re.compile(
 CONTENT_LINK_RE = re.compile(r"\[\[(?!(?:Category|分类|分類)\s*:)[^\]]+\]\]", re.IGNORECASE)
 HEADER_TEMPLATE_START_RE = re.compile(r"^\s*\{\{\s*header/裁判文书\b", re.IGNORECASE)
 HEADER_PARAM_LINE_RE = re.compile(r"^(\s*\|\s*)([^=|\n]+?)(\s*=\s*)(.*?)(\s*)$")
-ASCII_MULTIPLICATION_RE = re.compile(r"(?<=[0-9０-９）)元平方米%％])\*(?=[0-9０-９（(])")
-FULLWIDTH_X_MULTIPLICATION_RE = re.compile(r"(?<=[0-9０-９）)元平方米%％])\s*[xXｘＸ]\s*(?=[0-9０-９（(])")
+SPACED_CROSS_MULTIPLICATION_RE = re.compile(r"(?<=[0-9０-９）)元平方米%％])\s*×\s*(?=[0-9０-９（(])")
 UNGAPPED_COLON_HEADING_RE = re.compile(r"(?m)^(?!\{\{gap\}\})[\u4e00-\u9fff][^\n]{1,40}：\s*$")
 CJK_LINE_START_RE = re.compile(r"^[\u4e00-\u9fff]")
 PARTY_LABEL_RE = re.compile(
@@ -84,7 +83,7 @@ def body_redaction_penalty(content: str) -> int:
     """Score malformed or split redaction markers in the body."""
     text = _without_header_title_line(content)
     return (
-        len(REDACTION_SEQUENCE_PATTERN.findall(text))
+        len(find_redaction_marker_runs(text))
         + 3 * len(SPLIT_REDACTION_AFTER_TEMPLATE_RE.findall(text))
         + 3 * len(SPLIT_REDACTION_BEFORE_TEMPLATE_RE.findall(text))
         + 10 * len(MALFORMED_PRC_REDACT_RE.findall(text))
@@ -109,9 +108,7 @@ def formatting_regression_penalty(content: str) -> int:
     """Score formatting artifacts that make otherwise equivalent pages worse."""
     text = normalize_wikitext_for_comparison(content)
     penalty = (
-        5 * len(ASCII_MULTIPLICATION_RE.findall(text))
-        + 5 * len(FULLWIDTH_X_MULTIPLICATION_RE.findall(text))
-        + 4 * len(UNGAPPED_COLON_HEADING_RE.findall(text))
+        4 * len(UNGAPPED_COLON_HEADING_RE.findall(text))
     )
 
     lines = text.splitlines()
@@ -296,8 +293,7 @@ def _is_gap_continuation_artifact(previous_text: str, continuation: str) -> bool
 
 def _canonicalize_formatting_artifacts(content: str) -> str:
     text = normalize_wikitext_for_comparison(content)
-    text = ASCII_MULTIPLICATION_RE.sub("×", text)
-    text = FULLWIDTH_X_MULTIPLICATION_RE.sub("×", text)
+    text = SPACED_CROSS_MULTIPLICATION_RE.sub("×", text)
 
     lines = []
     for line in text.split("\n"):

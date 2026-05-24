@@ -43,17 +43,14 @@ CJK_PATTERN = re.compile(
     r']'
 )
 
-REDACTION_SEQUENCE_PATTERN = re.compile(
-    r'(?:'
-        r'(?<![A-WYZa-wyz])[XxＸｘ]'  # Latin-like chars: guard against preceding Latin letter
-        r'|'
-        r'[×*＊∗✱﹡⁎٭※]'              # Non-Latin chars: always safe to start here
-    r')'
-    r'[×XxＸｘ*＊∗✱﹡⁎٭※]*'           # Any continuation (mixed sequences: PTF**X etc.)
-    r'(?![A-WYZa-wyz\d.])'             # No following Latin letter, digit, or decimal point
-)
+REDACTION_MARKER_CHARS = '×XxＸｘ*＊∗✱﹡⁎٭※'
+LATIN_REDACTION_MARKER_CHARS = 'XxＸｘ'
+REDACTION_SEQUENCE_PATTERN = re.compile(r'[×XxＸｘ*＊∗✱﹡⁎٭※]+')
+ADJACENT_PRC_REDACT_TEMPLATE_RE = re.compile(r'(?:\{\{PRC-redact\|\d+\}\}){2,}')
+LATIN_NON_MARKER_RE = re.compile(r'[A-WYZa-wyz]')
+NUMBER_OR_DOT_RE = re.compile(r'[\d.]')
 MULTIPLICATION_OPERATOR_RE = re.compile(
-    r'(?<=[0-9０-９%％）)元平方米])\s*[xXｘＸ*＊]\s*(?=[0-9０-９（(])'
+    r'(?<=[0-9０-９%％）)元平方米])\s*×\s*(?=[0-9０-９（(])'
 )
 SIGNATURE_LEADING_JUNK_RE = re.compile(r'^[.\u2026．·・、。]+')
 
@@ -139,10 +136,12 @@ def normalize_redaction_markers(text: str) -> str:
         return text
 
     def replacer(match: re.Match) -> str:
+        if not is_redaction_marker_run(text, match.start(), match.end()):
+            return match.group(0)
         length = len(match.group(0))
         return f"{{{{PRC-redact|{length}}}}}"
 
-    return REDACTION_SEQUENCE_PATTERN.sub(replacer, text)
+    return collapse_adjacent_redaction_templates(REDACTION_SEQUENCE_PATTERN.sub(replacer, text))
 
 
 def normalize_title_redaction_markers(text: str) -> str:
@@ -154,20 +153,72 @@ def normalize_title_redaction_markers(text: str) -> str:
     if not text:
         return text
 
-    return REDACTION_SEQUENCE_PATTERN.sub(lambda match: '×' * len(match.group(0)), text)
+    def replacer(match: re.Match) -> str:
+        if not is_redaction_marker_run(text, match.start(), match.end()):
+            return match.group(0)
+        return '×' * len(match.group(0))
+
+    return REDACTION_SEQUENCE_PATTERN.sub(replacer, text)
 
 
 def normalize_multiplication_symbols(text: str) -> str:
     """
-    Normalize OCR multiplication operators in numeric expressions to ×.
+    Normalize literal multiplication signs in numeric expressions to ×.
 
-    Redaction markers reuse x/*-like characters, so only normalize when the
-    character is between numeric/unit contexts such as "元ｘ70%" or "*48个月".
+    Redaction markers reuse star-like characters. Only an existing literal
+    "×" is treated as multiplication; OCR x/* variants are left for redaction
+    marker normalization.
     """
     if not text:
         return text
 
     return MULTIPLICATION_OPERATOR_RE.sub('×', text)
+
+
+def is_redaction_marker_run(text: str, start: int, end: int) -> bool:
+    """Return whether a matched marker run should be redaction."""
+    run = text[start:end]
+    if not run:
+        return False
+
+    if any(char in LATIN_REDACTION_MARKER_CHARS for char in run):
+        previous_char = text[start - 1] if start > 0 else ''
+        next_char = text[end] if end < len(text) else ''
+        if LATIN_NON_MARKER_RE.fullmatch(previous_char) or LATIN_NON_MARKER_RE.fullmatch(next_char):
+            return False
+
+    next_char = text[end] if end < len(text) else ''
+    if run == '×' and NUMBER_OR_DOT_RE.fullmatch(next_char):
+        return False
+
+    return True
+
+
+def find_redaction_marker_runs(text: str) -> List[str]:
+    """Return raw marker runs that should be normalized as redaction."""
+    if not text:
+        return []
+    return [
+        match.group(0)
+        for match in REDACTION_SEQUENCE_PATTERN.finditer(text)
+        if is_redaction_marker_run(text, match.start(), match.end())
+    ]
+
+
+def collapse_adjacent_redaction_templates(text: str) -> str:
+    """Collapse directly adjacent {{PRC-redact|N}} templates."""
+    if not text:
+        return text
+
+    def replacer(match: re.Match) -> str:
+        count = sum(int(value) for value in re.findall(r'\{\{PRC-redact\|(\d+)\}\}', match.group(0)))
+        return f"{{{{PRC-redact|{count}}}}}"
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = ADJACENT_PRC_REDACT_TEMPLATE_RE.sub(replacer, text)
+    return text
 
 
 def normalize_case_number_parentheses(text: str) -> str:

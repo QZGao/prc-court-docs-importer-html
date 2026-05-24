@@ -132,9 +132,27 @@ class TestRedactionNormalization:
         assert normalize_redaction_markers("张三Xｘ*李四") == "张三{{PRC-redact|3}}李四"
         assert normalize_redaction_markers("张三Ｘ×xx李四") == "张三{{PRC-redact|4}}李四"
 
-    def test_single_marker_is_not_replaced(self):
+    def test_single_marker_is_normalized(self):
         assert normalize_redaction_markers("张三x李四") == "张三{{PRC-redact|1}}李四"
         assert normalize_redaction_markers("*") == "{{PRC-redact|1}}"
+
+    def test_non_cross_markers_redact_next_to_numbers(self):
+        assert normalize_redaction_markers("张三*123") == "张三{{PRC-redact|1}}123"
+        assert normalize_redaction_markers("张三**123") == "张三{{PRC-redact|2}}123"
+        assert normalize_redaction_markers("张三xx123") == "张三{{PRC-redact|2}}123"
+        assert normalize_redaction_markers("3x123") == "3{{PRC-redact|1}}123"
+        assert normalize_redaction_markers("{{PRC-redact|2}}*123") == "{{PRC-redact|3}}123"
+
+    def test_literal_cross_number_adjacency_is_preserved(self):
+        assert normalize_redaction_markers("3×123") == "3×123"
+        assert normalize_redaction_markers("×123") == "×123"
+        assert normalize_redaction_markers("1×号") == "1{{PRC-redact|1}}号"
+        assert normalize_redaction_markers("××123") == "{{PRC-redact|2}}123"
+
+    def test_latin_word_guard_still_applies_to_x_markers(self):
+        assert normalize_redaction_markers("textXword") == "textXword"
+        assert normalize_redaction_markers("textx") == "textx"
+        assert normalize_redaction_markers("text*word") == "text{{PRC-redact|1}}word"
 
 
 class TestTitleRedactionNormalization:
@@ -148,6 +166,8 @@ class TestTitleRedactionNormalization:
         assert normalize_title_redaction_markers("张三x执行裁定书") == "张三×执行裁定书"
         assert normalize_title_redaction_markers("张三X执行裁定书") == "张三×执行裁定书"
         assert normalize_title_redaction_markers("张三*执行裁定书") == "张三×执行裁定书"
+        assert normalize_title_redaction_markers("张三*123执行裁定书") == "张三×123执行裁定书"
+        assert normalize_title_redaction_markers("3×123执行裁定书") == "3×123执行裁定书"
 
 
 class TestRemoveCjkSpaces:
@@ -340,13 +360,14 @@ class TestHtmlNormalization:
         body_texts = [b.text for b in doc.body_blocks]
         assert any("正文" in t for t in body_texts)
 
-    def test_clean_text_normalizes_numeric_multiplication_without_redaction(self):
-        text = "赔偿3,459.60元（4,942.28元ｘ70%），物业费2.3元/月.平方米*163.64平方米*48个月，张三*。"
+    def test_clean_text_redacts_non_cross_stars_next_to_numbers(self):
+        text = "赔偿3×123元（4,942.28元ｘ70%），物业费2.3元/月.平方米*163.64平方米*48个月，张三*。"
 
         result = clean_text(text)
 
-        assert "4,942.28元×70%" in result
-        assert "2.3元/月.平方米×163.64平方米×48个月" in result
+        assert "3×123元" in result
+        assert "4,942.28元{{PRC-redact|1}}70%" in result
+        assert "2.3元/月.平方米{{PRC-redact|1}}163.64平方米{{PRC-redact|1}}48个月" in result
         assert "张三{{PRC-redact|1}}。" in result
 
 

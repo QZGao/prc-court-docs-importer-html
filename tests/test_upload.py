@@ -598,7 +598,7 @@ def test_upload_document_skips_formatting_regressed_import_without_overwrite(mon
     assert saves == []
 
 
-def test_upload_document_skips_typographic_multiplication_regression_without_overwrite(monkeypatch):
+def test_upload_document_reviews_cross_to_non_cross_star_change(monkeypatch):
     title = "张三与李四民事判决书"
     existing_content = make_header_page(
         title=title,
@@ -621,11 +621,14 @@ def test_upload_document_skips_typographic_multiplication_regression_without_ove
 
     result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
 
-    assert result.status == "skipped"
+    assert result.status == "reverted_overwrite"
     assert result.final_title == title
     assert result.case_title == case_title
-    assert "Skipped formatting-regressed import" in result.message
-    assert saves == []
+    assert len(saves) == 2
+    assert saves[0][0] == title
+    assert saves[0][1] == wikitext
+    assert saves[1][0] == title
+    assert saves[1][1] == f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
 
 
 def test_upload_document_saves_pure_line_wrap_improvement_without_review(monkeypatch):
@@ -692,7 +695,7 @@ def test_upload_document_saves_pure_ungapped_line_wrap_improvement_without_revie
     assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
 
 
-def test_upload_document_saves_pure_multiplication_improvement_without_review(monkeypatch):
+def test_upload_document_reviews_non_cross_star_to_cross_change(monkeypatch):
     title = "张三与李四民事判决书"
     existing_content = make_header_page(
         title=title,
@@ -714,10 +717,12 @@ def test_upload_document_saves_pure_multiplication_improvement_without_review(mo
 
     result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
 
-    assert result.status == "uploaded"
-    assert len(saves) == 1
+    assert result.status == "reverted_overwrite"
+    assert len(saves) == 2
+    assert saves[0][0] == title
     assert saves[0][1] == wikitext
-    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
+    assert saves[1][0] == title
+    assert saves[1][1] == f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
 
 
 def test_upload_document_saves_pure_signature_structure_improvement_without_review(monkeypatch):
