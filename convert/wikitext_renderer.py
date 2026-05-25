@@ -6,11 +6,14 @@ This module converts ParsedDocument objects into zhwikisource-friendly wikitext.
 
 import re
 from dataclasses import replace
+from html import escape as html_escape
 from typing import Optional, Tuple
+from bs4 import BeautifulSoup, NavigableString, Tag
 from .html_normalizer import (
     ParsedDocument,
     ContentBlock,
     BlockType,
+    clean_text,
     extract_date_components,
     strip_signature_leading_junk,
 )
@@ -42,37 +45,316 @@ def format_paragraph(block: ContentBlock, force_gap: bool = False) -> str:
     return text
 
 
-def format_table(block: ContentBlock) -> str:
+def escape_table_attribute_value(value: str) -> str:
+    """Escape an HTML attribute value for MediaWiki table syntax."""
+    value = re.sub(r'\s+', ' ', value).strip()
+    return html_escape(value, quote=True).replace('|', '&#124;')
+
+
+def format_html_attrs(tag: Tag, add_wikitable_class: bool = False) -> str:
+    """Format HTML attributes for MediaWiki table, row, caption, or cell lines."""
+    attrs = []
+    class_seen = False
+    table_class_attr = None
+
+    for raw_name, raw_value in tag.attrs.items():
+        name = raw_name.lower()
+        if not name or name.startswith('on'):
+            continue
+
+        if isinstance(raw_value, (list, tuple)):
+            value = ' '.join(str(item) for item in raw_value)
+        elif raw_value is None:
+            value = ''
+        else:
+            value = str(raw_value)
+
+        if name == 'class':
+            class_seen = True
+            classes = value.split()
+            if add_wikitable_class and 'wikitable' not in classes:
+                classes.append('wikitable')
+            value = ' '.join(classes)
+
+        attr_text = name if not value else f'{name}="{escape_table_attribute_value(value)}"'
+        if add_wikitable_class and name == 'class':
+            table_class_attr = attr_text
+            continue
+
+        attrs.append(attr_text)
+
+    if add_wikitable_class:
+        attrs.insert(0, table_class_attr if class_seen else 'class="wikitable"')
+
+    return ' '.join(attrs)
+
+
+def escape_table_control_line(text: str) -> str:
+    """Escape text lines that would otherwise be read as table markup."""
+    if text.startswith('|'):
+        return f'&#124;{text[1:]}'
+    if text.startswith('!'):
+        return f'&#33;{text[1:]}'
+    return text
+
+
+def normalize_table_text(text: str) -> str:
+    """Normalize text inside table captions and cells while preserving <br> breaks."""
+    if not text:
+        return ""
+
+    lines = []
+    for line in text.split('\n'):
+        cleaned = clean_text(line)
+        if cleaned:
+            lines.append(escape_table_control_line(cleaned))
+        elif lines and lines[-1] != "":
+            lines.append("")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    return '\n'.join(lines)
+
+
+def is_one_line_table_content(content: str, marker: str) -> bool:
+    """Return whether content can safely remain on the same table markup line."""
+    if '\n' in content:
+        return False
+    if '|' in content:
+        return False
+    if marker == '!' and '!' in content:
+        return False
+    return True
+
+
+def format_table_list(list_element: Tag) -> str:
+    """Format a list inside a table cell."""
+    marker = '#' if list_element.name == 'ol' else '*'
+    lines = []
+    for item in list_element.find_all('li', recursive=False):
+        content = format_table_fragment(item)
+        if content:
+            lines.append(f"{marker} {content}")
+    return '\n'.join(lines)
+
+
+def format_table_fragment(parent: Tag) -> str:
+    """Convert mixed HTML content inside a table cell or caption to wikitext."""
+    parts = []
+    inline_parts = []
+
+    def flush_inline() -> None:
+        if not inline_parts:
+            return
+        text = normalize_table_text(''.join(inline_parts))
+        inline_parts.clear()
+        if text:
+            parts.append(text)
+
+    for child in parent.children:
+        if isinstance(child, NavigableString):
+            inline_parts.append(str(child))
+            continue
+
+        if not isinstance(child, Tag):
+            continue
+
+        name = child.name.lower()
+        if name == 'br':
+            inline_parts.append('\n')
+        elif name == 'table':
+            flush_inline()
+            nested = table_tag_to_wikitext(child)
+            if nested:
+                parts.append(nested)
+        elif name in ('ul', 'ol'):
+            flush_inline()
+            list_text = format_table_list(child)
+            if list_text:
+                parts.append(list_text)
+        elif name in ('p', 'div'):
+            flush_inline()
+            block_text = format_table_fragment(child)
+            if block_text:
+                parts.append(block_text)
+        else:
+            inline_parts.append(format_table_fragment(child))
+
+    flush_inline()
+    return '\n'.join(parts)
+
+
+def format_table_caption(caption: Tag) -> str:
+    """Format a table caption as MediaWiki caption syntax."""
+    attrs = format_html_attrs(caption)
+    content = format_table_fragment(caption).strip()
+
+    if attrs:
+        if content and is_one_line_table_content(content, '|'):
+            return f'|+ {attrs} | {content}'
+        lines = [f'|+ {attrs} |']
+        if content:
+            lines.append(content)
+        return '\n'.join(lines)
+
+    if content and is_one_line_table_content(content, '|'):
+        return f'|+ {content}'
+
+    lines = ['|+']
+    if content:
+        lines.append(content)
+    return '\n'.join(lines)
+
+
+def iter_row_group_rows(container: Tag):
+    """Yield rows from table row-group wrappers without entering nested tables."""
+    for child in container.children:
+        if not isinstance(child, Tag):
+            continue
+
+        name = child.name.lower()
+        if name == 'table':
+            continue
+        if name == 'tr':
+            yield child
+        elif name not in ('td', 'th'):
+            yield from iter_row_group_rows(child)
+
+
+def iter_table_items(table: Tag):
+    """Yield direct captions and rows for a table, including row-group children."""
+    for child in table.children:
+        if not isinstance(child, Tag):
+            continue
+
+        name = child.name.lower()
+        if name == 'caption':
+            yield 'caption', child
+        elif name == 'tr':
+            yield 'row', child
+        elif name in ('thead', 'tbody', 'tfoot'):
+            for row in iter_row_group_rows(child):
+                yield 'row', row
+
+
+def iter_row_cells(row: Tag):
+    """Yield direct cells from a table row without entering nested tables."""
+    for child in row.children:
+        if isinstance(child, Tag) and child.name.lower() in ('td', 'th'):
+            yield child
+
+
+def format_table_cell(cell: Tag) -> str:
+    """Format one td/th element."""
+    marker = '!' if cell.name.lower() == 'th' else '|'
+    attrs = format_html_attrs(cell)
+    content = format_table_fragment(cell).strip()
+
+    if attrs:
+        if content and is_one_line_table_content(content, marker):
+            return f'{marker} {attrs} | {content}'
+        lines = [f'{marker} {attrs} |']
+        if content:
+            lines.append(content)
+        return '\n'.join(lines)
+
+    if content and is_one_line_table_content(content, marker):
+        return f'{marker} {content}'
+
+    lines = [marker]
+    if content:
+        lines.append(content)
+    return '\n'.join(lines)
+
+
+def format_table_row(row: Tag) -> str:
+    """Format one tr element."""
+    attrs = format_html_attrs(row)
+    lines = [f'|- {attrs}'.rstrip()]
+    for cell in iter_row_cells(row):
+        lines.append(format_table_cell(cell))
+    return '\n'.join(lines)
+
+
+def table_tag_to_wikitext(table: Tag) -> str:
     """
-    Format a table block as standard wikitext table syntax.
+    Convert a BeautifulSoup table tag to MediaWiki table syntax.
+
+    Inspired by Borislav Manolov's 2004 HTML to Wiki Converter table handling
+    (http://purl.org/NET/borislav), which converts HTML table tags to the
+    MediaWiki table syntax originally developed by Magnus Manske. This
+    implementation is parser-based and adapted for this converter's court
+    document pipeline.
     """
+    attrs = format_html_attrs(table, add_wikitable_class=True)
+    lines = [f'{{| {attrs}'.rstrip()]
+    has_content = False
+
+    for item_type, item in iter_table_items(table):
+        if item_type == 'caption':
+            caption = format_table_caption(item)
+            if caption:
+                lines.append(caption)
+                has_content = True
+        elif item_type == 'row':
+            row = format_table_row(item)
+            if row:
+                lines.append(row)
+                has_content = True
+
+    if not has_content:
+        return ""
+
+    lines.append('|}')
+    return '\n'.join(lines)
+
+
+def format_table_from_metadata(block: ContentBlock) -> str:
+    """Fallback formatter for legacy table blocks without raw HTML."""
     rows = block.metadata.get('rows', [])
     if not rows:
         return ""
-    
+
     lines = ['{| class="wikitable"']
-    
+
     for row in rows:
         lines.append('|-')
         for cell in row:
+            marker = '!' if cell.get('header') else '|'
             text = escape_wikitext(cell['text'])
             colspan = cell.get('colspan', 1)
             rowspan = cell.get('rowspan', 1)
-            
-            # Build cell attributes
+
             attrs = []
             if colspan > 1:
                 attrs.append(f'colspan="{colspan}"')
             if rowspan > 1:
                 attrs.append(f'rowspan="{rowspan}"')
-            
+
             if attrs:
-                lines.append(f'| {" ".join(attrs)} | {text}')
+                lines.append(f'{marker} {" ".join(attrs)} | {text}')
             else:
-                lines.append(f'| {text}')
-    
+                lines.append(f'{marker} {text}')
+
     lines.append('|}')
     return '\n'.join(lines)
+
+
+def format_table(block: ContentBlock) -> str:
+    """
+    Format a table block as standard wikitext table syntax.
+    """
+    raw_html = block.metadata.get('html') or block.raw_html
+    if raw_html:
+        soup = BeautifulSoup(raw_html, 'lxml')
+        table = soup.find('table')
+        if table:
+            wikitext = table_tag_to_wikitext(table)
+            if wikitext:
+                return wikitext
+
+    return format_table_from_metadata(block)
 
 
 def format_list(block: ContentBlock) -> str:

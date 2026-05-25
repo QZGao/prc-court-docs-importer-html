@@ -483,17 +483,26 @@ def parse_table(table: Tag) -> ContentBlock:
     """
     Parse a table element into a ContentBlock with table metadata.
     
-    Handles colspan and rowspan for merged cells.
+    The renderer keeps the raw HTML so it can preserve captions, headers,
+    attributes, and nested tables. The row metadata remains as a lightweight
+    fallback for callers that inspect normalized blocks directly.
     """
+    def parse_span(value) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 1
+
     rows = []
     
     for tr in table.find_all('tr'):
         cells = []
         for td in tr.find_all(['td', 'th']):
             cell_text = clean_text(td.get_text())
-            colspan = int(td.get('colspan', 1))
-            rowspan = int(td.get('rowspan', 1))
+            colspan = parse_span(td.get('colspan', 1))
+            rowspan = parse_span(td.get('rowspan', 1))
             cells.append({
+                'header': td.name == 'th',
                 'text': cell_text,
                 'colspan': colspan,
                 'rowspan': rowspan
@@ -505,7 +514,7 @@ def parse_table(table: Tag) -> ContentBlock:
         BlockType.TABLE,
         "",  # Text is in metadata
         str(table),
-        metadata={'rows': rows}
+        metadata={'rows': rows, 'html': str(table)}
     )
 
 
@@ -533,6 +542,70 @@ def parse_list(list_element: Tag) -> ContentBlock:
         str(list_element),
         metadata={'list_type': list_type, 'items': items}
     )
+
+
+def append_table_aware_child_blocks(container: Tag, blocks: List[ContentBlock]) -> None:
+    """
+    Append child blocks from an element that contains one or more tables.
+
+    This preserves table position inside wrapper elements without flattening the
+    table text into the surrounding paragraph.
+    """
+    for child in container.children:
+        if isinstance(child, NavigableString):
+            text = clean_text(str(child))
+            if text:
+                blocks.append(
+                    ContentBlock(
+                        BlockType.PARAGRAPH,
+                        text,
+                        str(child),
+                        indent=has_text_indent(container),
+                    )
+                )
+            continue
+
+        if not isinstance(child, Tag):
+            continue
+
+        append_element_block(child, blocks)
+
+
+def append_element_block(element: Tag, blocks: List[ContentBlock]) -> None:
+    """Append normalized block(s) for a single HTML element."""
+    if element.name == 'table':
+        blocks.append(parse_table(element))
+    elif element.name in ('ul', 'ol'):
+        block = parse_list(element)
+        if block.metadata.get('items'):
+            blocks.append(block)
+    elif element.find('table'):
+        append_table_aware_child_blocks(element, blocks)
+    elif element.name == 'div':
+        # Check if div contains p tags - if so, process them individually
+        p_tags = element.find_all('p', recursive=False)
+        if p_tags:
+            for p in p_tags:
+                block = parse_div_block(p)
+                if block.block_type != BlockType.EMPTY:
+                    blocks.append(block)
+        else:
+            # Also check for nested divs containing p tags
+            nested_p_tags = element.find_all('p')
+            if nested_p_tags:
+                for p in nested_p_tags:
+                    block = parse_div_block(p)
+                    if block.block_type != BlockType.EMPTY:
+                        blocks.append(block)
+            else:
+                block = parse_div_block(element)
+                if block.block_type != BlockType.EMPTY:
+                    blocks.append(block)
+    elif element.name in ('p', 'span'):
+        # Treat like div
+        block = parse_div_block(element)
+        if block.block_type != BlockType.EMPTY:
+            blocks.append(block)
 
 
 def normalize_html(html_content: str) -> ParsedDocument:
@@ -566,37 +639,7 @@ def normalize_html(html_content: str) -> ParsedDocument:
             continue
         
         # Handle different element types
-        if element.name == 'table':
-            all_blocks.append(parse_table(element))
-        elif element.name in ('ul', 'ol'):
-            block = parse_list(element)
-            if block.metadata.get('items'):
-                all_blocks.append(block)
-        elif element.name == 'div':
-            # Check if div contains p tags - if so, process them individually
-            p_tags = element.find_all('p', recursive=False)
-            if p_tags:
-                for p in p_tags:
-                    block = parse_div_block(p)
-                    if block.block_type != BlockType.EMPTY:
-                        all_blocks.append(block)
-            else:
-                # Also check for nested divs containing p tags
-                nested_p_tags = element.find_all('p')
-                if nested_p_tags:
-                    for p in nested_p_tags:
-                        block = parse_div_block(p)
-                        if block.block_type != BlockType.EMPTY:
-                            all_blocks.append(block)
-                else:
-                    block = parse_div_block(element)
-                    if block.block_type != BlockType.EMPTY:
-                        all_blocks.append(block)
-        elif element.name in ('p', 'span'):
-            # Treat like div
-            block = parse_div_block(element)
-            if block.block_type != BlockType.EMPTY:
-                all_blocks.append(block)
+        append_element_block(element, all_blocks)
         # Skip other elements like script, style, etc.
     
     # Now categorize blocks into document sections

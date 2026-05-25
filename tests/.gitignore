@@ -5,3 +5,4 @@
 !__init__.py
 !test_*.py
 !test_cases.json
+!table_test_cases.jsonl
