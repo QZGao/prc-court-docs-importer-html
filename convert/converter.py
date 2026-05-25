@@ -30,6 +30,81 @@ LEADING_JUNK_RE = re.compile(r'^[^\u4e00-\u9fff]+')
 CASE_NUMBER_RE = re.compile(r'（.*?号(?:之[一二三四五六七八九十百千万〇零]+)?')
 NON_CJK_RE = re.compile(r'[^\u4e00-\u9fff]+')
 DOC_TYPE_RE = re.compile(r'[\u4e00-\u9fff]*(?:裁定书|判决书|决定书|通知书|调解书|裁决书|支付令)')
+COURT_COMMITTEE_SUFFIX_RE = re.compile(r'^[\u4e00-\u9fff]{1,12}委员会')
+TITLE_DOC_TYPE_SUFFIXES = (
+    '不予受理支付令申请通知书',
+    '不予暂予监外执行决定书',
+    '刑事附带民事公益诉讼判决书',
+    '终结本次执行程序执行裁定书',
+    '财产保全告知事项通知书',
+    '申请执行案件结案通知书',
+    '刑事附带民事判决书',
+    '刑事附带民事裁定书',
+    '强制清算与破产裁定书',
+    '执行案件结案通知书',
+    '执行案件执行裁定书',
+    '执行保全结案通知书',
+    '诉讼保全结案通知书',
+    '保全案件结案通知书',
+    '案件执行结束通知书',
+    '执行案件完毕通知书',
+    '执行案件受理通知书',
+    '暂予监外执行决定书',
+    '非诉保全审查裁定书',
+    '非诉行政执行裁定书',
+    '国家司法救助决定书',
+    '国家赔偿决定书',
+    '行政赔偿判决书',
+    '行政赔偿裁定书',
+    '行政执行裁定书',
+    '保全结案通知书',
+    '保全情况通知书',
+    '执行结案通知书',
+    '执行完毕通知书',
+    '终结结案通知书',
+    '受理案件通知书',
+    '协助执行通知书',
+    '恢复执行通知书',
+    '指定管辖决定书',
+    '执行协调决定书',
+    '司法救助决定书',
+    '收监执行决定书',
+    '民事判决书',
+    '刑事判决书',
+    '行政判决书',
+    '民事裁定书',
+    '刑事裁定书',
+    '行政裁定书',
+    '执行裁定书',
+    '民事调解书',
+    '刑事调解书',
+    '行政调解书',
+    '民事决定书',
+    '刑事决定书',
+    '执行决定书',
+    '拘留决定书',
+    '罚款决定书',
+    '复议决定书',
+    '再审决定书',
+    '执行通知书',
+    '结案通知书',
+    '受理通知书',
+    '应诉通知书',
+    '执结通知书',
+    '销案通知书',
+    '民事支付令',
+    '民事令',
+    '刑事令',
+    '行政令',
+    '支付令',
+    '判决书',
+    '裁定书',
+    '决定书',
+    '通知书',
+    '调解书',
+    '案件移送函',
+    '保全复函',
+)
 
 
 class ConversionInterrupted(KeyboardInterrupt):
@@ -80,7 +155,7 @@ def _remove_once(text: str, fragment: str) -> str:
 
 
 def normalize_court_name(court: str) -> str:
-    """Strip junk around a court name and require the value to end at 法院."""
+    """Strip junk around a court name and allow immediate 法院...委员会 suffixes."""
     court = _compact_metadata_text(court)
     if not court:
         return ""
@@ -90,7 +165,12 @@ def normalize_court_name(court: str) -> str:
     if court_end == -1:
         return ""
 
-    return court[:court_end + len('法院')]
+    end = court_end + len('法院')
+    committee_match = COURT_COMMITTEE_SUFFIX_RE.match(court[end:])
+    if committee_match:
+        end += committee_match.end()
+
+    return court[:end]
 
 
 def normalize_case_number_value(case_number: str) -> str:
@@ -156,6 +236,19 @@ def extract_doc_type_from_s22(s22: str, court: str, doc_id: str) -> str:
     remainder = _remove_once(remainder, normalize_case_number_value(doc_id))
 
     return normalize_doc_type(remainder)
+
+
+def extract_doc_type_from_title(title: str) -> str:
+    """Extract a document type from known type suffixes in the title."""
+    title = _compact_metadata_text(title)
+    if not title:
+        return ""
+
+    for doc_type in TITLE_DOC_TYPE_SUFFIXES:
+        if title.endswith(doc_type):
+            return doc_type
+
+    return ""
 
 
 def extract_date_components_from_s31(s31: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -297,6 +390,8 @@ def convert_document(raw_json: dict) -> Tuple[Optional[ConversionResult], Option
         doc_type = normalize_doc_type(doc.doc_type)
         if not doc_type:
             doc_type = extract_doc_type_from_s22(s22, court, case_number)
+        if not doc_type:
+            doc_type = extract_doc_type_from_title(title)
     except Exception as e:
         return None, ConversionError(
             error_stage="block_detect",

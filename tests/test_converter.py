@@ -38,6 +38,7 @@ from convert.converter import (
     extract_case_number_from_s22,
     extract_date_components_from_s31,
     extract_doc_type_from_s22,
+    extract_doc_type_from_title,
     infer_court_with_province,
     iter_json_objects,
     normalize_case_number_value,
@@ -405,6 +406,21 @@ class TestDocTypeExtraction:
         result = extract_doc_type_from_s22(s22, "柳州市柳南区人民法院", "（2019）桂0204民初2440号")
         assert result == "执行裁定书"
 
+    @pytest.mark.parametrize("doc_type", ["民事判决书", "刑事判决书", "行政判决书", "民事令", "刑事令", "行政令"])
+    def test_title_suffix_extraction(self, doc_type):
+        assert extract_doc_type_from_title(f"张三与李四纠纷{doc_type}") == doc_type
+
+    @pytest.mark.parametrize("doc_type", ["民事裁定书", "执行裁定书", "民事调解书", "结案通知书", "执行通知书", "支付令"])
+    def test_title_suffix_extraction_observed_s41_suffixes(self, doc_type):
+        assert extract_doc_type_from_title(f"张三与李四纠纷{doc_type}") == doc_type
+
+    @pytest.mark.parametrize("doc_type", ["刑事附带民事判决书", "民事支付令", "行政赔偿判决书"])
+    def test_title_suffix_extraction_prefers_longest_suffix(self, doc_type):
+        assert extract_doc_type_from_title(f"张三与李四纠纷{doc_type}") == doc_type
+
+    def test_title_suffix_extraction_ignores_unlisted_suffixes(self):
+        assert extract_doc_type_from_title("测试结案报告") == ""
+
 
 class TestCourtInference:
     """Tests for court name inference with province."""
@@ -414,6 +430,18 @@ class TestCourtInference:
 
     def test_normalize_court_name_removes_trailing_junk_after_fayuan(self):
         assert normalize_court_name("北京市第一中级人民法院（执行局）") == "北京市第一中级人民法院"
+
+    def test_normalize_court_name_keeps_immediate_committee_suffix(self):
+        assert normalize_court_name("四川省绵阳市中级人民法院赔偿委员会") == "四川省绵阳市中级人民法院赔偿委员会"
+
+    def test_normalize_court_name_strips_metadata_after_committee_suffix(self):
+        s22 = "四川省绵阳市中级人民法院赔偿委员会\n国家赔偿决定书\n（2021）川07委赔8号"
+        assert normalize_court_name(s22) == "四川省绵阳市中级人民法院赔偿委员会"
+
+    def test_extract_doc_type_from_s22_removes_committee_court_name(self):
+        s22 = "四川省绵阳市中级人民法院赔偿委员会\n国家赔偿决定书\n（2021）川07委赔8号"
+        result = extract_doc_type_from_s22(s22, "四川省绵阳市中级人民法院赔偿委员会", "（2021）川07委赔8号")
+        assert result == "国家赔偿决定书"
 
     def test_normalize_case_number_extracts_parenthesized_number_through_hao(self):
         assert normalize_case_number_value("案号：(2024)京01执123号附件") == "（2024）京01执123号"
@@ -859,7 +887,28 @@ class TestWikitextRendering:
         assert result is not None
         assert result.court == "柳州市柳南区人民法院"
         assert result.doc_id == "（2019）桂0204民初2440号"
-        assert result.doc_type == ""
+        assert result.doc_type == "执行裁定书"
+
+    def test_convert_document_extracts_doc_type_from_title_suffix(self):
+        raw_json = {
+            "s1": "张三危险驾驶罪刑事判决书",
+            "wsKey": "doc-title-type",
+            "s2": "柳州市柳南区人民法院",
+            "s7": "（2019）桂0204刑初2440号",
+            "s22": "柳州市柳南区人民法院\n（2019）桂0204刑初2440号",
+            "s31": "2019-09-30",
+            "qwContent": """
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert result.doc_type == "刑事判决书"
+        assert "|type = 刑事判决书" in result.wikitext
 
     def test_convert_document_keeps_zhi_suffix_in_case_number(self):
         raw_json = {
