@@ -598,7 +598,7 @@ def test_upload_document_skips_formatting_regressed_import_without_overwrite(mon
     assert saves == []
 
 
-def test_upload_document_reviews_cross_to_non_cross_star_change(monkeypatch):
+def test_upload_document_saves_cross_to_redaction_template_update_without_review(monkeypatch):
     title = "张三与李四民事判决书"
     existing_content = make_header_page(
         title=title,
@@ -606,7 +606,7 @@ def test_upload_document_reviews_cross_to_non_cross_star_change(monkeypatch):
         doc_type="民事判决书",
         case_number="（2024）京01民终1号",
     ).replace("正文。", "{{gap}}赔偿损失3,459.60元（4,942.28元×70%）。")
-    wikitext = existing_content.replace("4,942.28元×70%", "4,942.28元ｘ70%")
+    wikitext = existing_content.replace("4,942.28元×70%", "4,942.28元{{PRC-redact|1}}70%")
     case_title = "北京市第一中级人民法院（2024）京01民终1号民事判决书"
     saves = []
 
@@ -621,14 +621,14 @@ def test_upload_document_reviews_cross_to_non_cross_star_change(monkeypatch):
 
     result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
 
-    assert result.status == "reverted_overwrite"
+    assert result.status == "uploaded"
     assert result.final_title == title
     assert result.case_title == case_title
-    assert len(saves) == 2
+    assert "Saved safe automated update without review category" in result.message
+    assert len(saves) == 1
     assert saves[0][0] == title
     assert saves[0][1] == wikitext
-    assert saves[1][0] == title
-    assert saves[1][1] == f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+    assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
 
 
 def test_upload_document_saves_pure_line_wrap_improvement_without_review(monkeypatch):
@@ -695,7 +695,7 @@ def test_upload_document_saves_pure_ungapped_line_wrap_improvement_without_revie
     assert "[[Category:覆盖版本未检查的裁判文书]]" not in saves[0][1]
 
 
-def test_upload_document_reviews_non_cross_star_to_cross_change(monkeypatch):
+def test_upload_document_does_not_treat_cross_as_redaction_improvement(monkeypatch):
     title = "张三与李四民事判决书"
     existing_content = make_header_page(
         title=title,

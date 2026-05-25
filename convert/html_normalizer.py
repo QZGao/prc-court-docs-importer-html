@@ -181,7 +181,7 @@ def is_redaction_marker_run(text: str, start: int, end: int) -> bool:
     if not run:
         return False
 
-    if any(char in LATIN_REDACTION_MARKER_CHARS for char in run):
+    if any(char in LATIN_REDACTION_MARKER_CHARS for char in run) and not has_adjacent_latin_redaction_markers(run):
         previous_char = text[start - 1] if start > 0 else ''
         next_char = text[end] if end < len(text) else ''
         if LATIN_NON_MARKER_RE.fullmatch(previous_char) or LATIN_NON_MARKER_RE.fullmatch(next_char):
@@ -192,6 +192,15 @@ def is_redaction_marker_run(text: str, start: int, end: int) -> bool:
         return False
 
     return True
+
+
+def has_adjacent_latin_redaction_markers(run: str) -> bool:
+    """Return whether a run has adjacent X-like redaction markers."""
+    return any(
+        run[index] in LATIN_REDACTION_MARKER_CHARS
+        and run[index + 1] in LATIN_REDACTION_MARKER_CHARS
+        for index in range(len(run) - 1)
+    )
 
 
 def find_redaction_marker_runs(text: str) -> List[str]:

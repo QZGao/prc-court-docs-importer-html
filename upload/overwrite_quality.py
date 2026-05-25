@@ -143,10 +143,20 @@ def is_safe_redaction_marker_update(import_wikitext: str, existing_content: str)
     if existing_text == import_text:
         return False
 
-    if canonicalize_redaction_markers(existing_text) != canonicalize_redaction_markers(import_text):
+    existing_canon = canonicalize_redaction_markers(existing_text)
+    import_canon = canonicalize_redaction_markers(import_text)
+    existing_penalty = body_redaction_penalty(existing_text)
+    import_penalty = body_redaction_penalty(import_text)
+
+    if existing_canon == import_canon:
+        return import_penalty < existing_penalty
+
+    if _redaction_templates_to_crosses(existing_canon) != _redaction_templates_to_crosses(import_canon):
+        return False
+    if import_penalty > existing_penalty:
         return False
 
-    return body_redaction_penalty(import_text) < body_redaction_penalty(existing_text)
+    return _redaction_template_count(import_canon) > _redaction_template_count(existing_canon)
 
 
 def is_safe_header_only_update(import_wikitext: str, existing_content: str) -> bool:
@@ -273,6 +283,10 @@ def _normalize_case_number_value_brackets(value: str) -> str:
 
 def _redaction_templates_to_crosses(value: str) -> str:
     return PRC_REDACT_TEMPLATE_RE.sub(lambda match: "×" * int(match.group(1)), value or "")
+
+
+def _redaction_template_count(value: str) -> int:
+    return sum(int(match.group(1)) for match in PRC_REDACT_TEMPLATE_RE.finditer(value or ""))
 
 
 def _previous_nonempty_line(lines: list[str], index: int) -> Optional[str]:

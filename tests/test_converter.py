@@ -154,6 +154,11 @@ class TestRedactionNormalization:
         assert normalize_redaction_markers("textx") == "textx"
         assert normalize_redaction_markers("text*word") == "text{{PRC-redact|1}}word"
 
+    def test_adjacent_x_markers_ignore_latin_word_guard(self):
+        assert normalize_redaction_markers("textXXword") == "text{{PRC-redact|2}}word"
+        assert normalize_redaction_markers("PLISXXXXXXXXXXXXX5108") == "PLIS{{PRC-redact|13}}5108"
+        assert normalize_redaction_markers("PLISX5108") == "PLISX5108"
+
 
 class TestTitleRedactionNormalization:
     """Tests for title-specific redaction normalization."""
@@ -168,6 +173,7 @@ class TestTitleRedactionNormalization:
         assert normalize_title_redaction_markers("张三*执行裁定书") == "张三×执行裁定书"
         assert normalize_title_redaction_markers("张三*123执行裁定书") == "张三×123执行裁定书"
         assert normalize_title_redaction_markers("3×123执行裁定书") == "3×123执行裁定书"
+        assert normalize_title_redaction_markers("PLISXXXXXXXXXXXXX5108执行裁定书") == "PLIS×××××××××××××5108执行裁定书"
 
 
 class TestRemoveCjkSpaces:
