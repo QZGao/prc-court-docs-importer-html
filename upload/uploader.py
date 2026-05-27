@@ -63,6 +63,7 @@ UNCHECKED_OVERWRITE_CATEGORY_RE = re.compile(
     rf"\[\[\s*(?:Category|分类|分類)\s*:\s*{re.escape(UNCHECKED_OVERWRITE_CATEGORY)}(?:\|[^\]\n]*)?\]\]",
     re.IGNORECASE,
 )
+HEADER_DOCID_PARAM_LINE_RE = re.compile(r"^\s*\|\s*docid\s*=", re.IGNORECASE)
 
 
 def utc_now_iso() -> str:
@@ -111,6 +112,27 @@ def _add_unchecked_overwrite_category(content: str) -> str:
         return content
 
     return f"{(content or '').rstrip()}\n{UNCHECKED_OVERWRITE_CATEGORY_LINE}\n"
+
+
+def _normalize_without_non_revision_metadata(content: Optional[str]) -> str:
+    """Normalize text while ignoring metadata that should not create revisions."""
+    text = UNCHECKED_OVERWRITE_CATEGORY_RE.sub("", content or "")
+    lines = [
+        line
+        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if not HEADER_DOCID_PARAM_LINE_RE.match(line)
+    ]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return normalize_wikitext_for_comparison(text)
+
+
+def _wikitexts_match_ignoring_non_revision_metadata(
+    left: Optional[str],
+    right: Optional[str],
+) -> bool:
+    """Return whether two texts differ only by docid or review-category metadata."""
+    return _normalize_without_non_revision_metadata(left) == _normalize_without_non_revision_metadata(right)
 
 
 def _append_message(message: str, extra: str) -> str:
@@ -407,6 +429,28 @@ def _hide_overwrite_revision_for_review(
             message=message,
             timestamp=timestamp,
             reason="Import matches existing page after safe normalization",
+        )
+
+    if _wikitexts_match_ignoring_non_revision_metadata(import_text, existing_for_decision):
+        if existing_changed_safely:
+            return _save_safe_existing_update(
+                source_title=source_title,
+                target_title=target_title,
+                wenshu_id=wenshu_id,
+                content=existing_for_decision,
+                case_title=case_title,
+                message=message,
+                timestamp=timestamp,
+                reason="Saved existing-page metadata normalization without overwrite",
+            )
+        return _build_no_overwrite_result(
+            source_title=source_title,
+            target_title=target_title,
+            wenshu_id=wenshu_id,
+            case_title=case_title,
+            message=message,
+            timestamp=timestamp,
+            reason="Import only changes docid or unchecked-overwrite category metadata",
         )
 
     if (

@@ -390,6 +390,97 @@ def test_upload_document_hides_overwritable_revision_with_review_category(monkey
     assert saves[1][2] == uploader.build_manual_revert_summary("doc-1")
 
 
+def test_upload_document_skips_docid_only_difference_without_overwrite(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = wikitext.replace("|docid = doc-1", "|docid = old-doc")
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(
+        uploader,
+        "save_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("save_page should not be called")),
+    )
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "skipped"
+    assert result.final_title == title
+    assert "docid or unchecked-overwrite category metadata" in result.message
+
+
+def test_upload_document_skips_unchecked_category_only_difference_without_overwrite(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = f"{wikitext.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(
+        uploader,
+        "save_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("save_page should not be called")),
+    )
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "skipped"
+    assert result.final_title == title
+    assert "docid or unchecked-overwrite category metadata" in result.message
+
+
+def test_upload_document_skips_docid_and_unchecked_category_difference_without_overwrite(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = wikitext.replace("|docid = doc-1", "|docid = old-doc")
+    existing_content = f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(
+        uploader,
+        "save_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("save_page should not be called")),
+    )
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "skipped"
+    assert result.final_title == title
+    assert "docid or unchecked-overwrite category metadata" in result.message
+
+
 def test_upload_document_keeps_safe_header_param_fill_without_review_category(monkeypatch):
     title = "张三与李四民事判决书"
     existing_content = make_header_page(
