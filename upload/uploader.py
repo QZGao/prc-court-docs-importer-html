@@ -29,6 +29,8 @@ from .mediawiki import (
 )
 from . import conflict_resolution as conflict_resolution_module
 from .conflict_resolution import (
+    add_entry_to_versions_page,
+    build_versions_page_content,
     is_conflict_resolvable,
     try_resolve_conflict,
     update_draft_for_conflict_resolution,
@@ -47,11 +49,17 @@ from .overwrite_quality import (
     structural_regression_penalty,
 )
 from .page_metadata import (
+    build_case_number_from_metadata,
     build_case_redirect_summary,
     build_case_redirect_text,
     build_case_title_from_content,
+    build_case_title_from_metadata,
     is_header_page,
+    is_versions_page,
+    normalize_court_name,
+    normalize_doc_type,
     normalize_wikitext_for_comparison,
+    parse_header_metadata,
     wikitexts_match,
 )
 
@@ -63,7 +71,10 @@ UNCHECKED_OVERWRITE_CATEGORY_RE = re.compile(
     rf"\[\[\s*(?:Category|分类|分類)\s*:\s*{re.escape(UNCHECKED_OVERWRITE_CATEGORY)}(?:\|[^\]\n]*)?\]\]",
     re.IGNORECASE,
 )
-HEADER_DOCID_PARAM_LINE_RE = re.compile(r"^\s*\|\s*docid\s*=", re.IGNORECASE)
+HEADER_DOCID_PARAM_LINE_RE = re.compile(r"^\s*\|\s*docid\d*\s*=", re.IGNORECASE)
+HEADER_DOCID_PARAM_RE = re.compile(r"^(\s*\|\s*docid)(\d*)(\s*=\s*)(.*?)(\s*)$", re.IGNORECASE)
+HEADER_TITLE_PARAM_LINE_RE = re.compile(r"^(\s*\|\s*title\s*=\s*).*$", re.IGNORECASE | re.MULTILINE)
+WIKILINK_RE = re.compile(r"^\s*\[\[([^\]|]+)(?:\|([^\]]+))?\]\]\s*$")
 
 
 def utc_now_iso() -> str:
@@ -133,6 +144,90 @@ def _wikitexts_match_ignoring_non_revision_metadata(
 ) -> bool:
     """Return whether two texts differ only by docid or review-category metadata."""
     return _normalize_without_non_revision_metadata(left) == _normalize_without_non_revision_metadata(right)
+
+
+def _docid_sort_key(suffix: str) -> int:
+    if suffix == "":
+        return 1
+    if suffix.isdigit():
+        return int(suffix)
+    return 10_000
+
+
+def _header_docids(content: Optional[str]) -> list[str]:
+    """Return non-empty Header/裁判文书 docid values in parameter order."""
+    metadata = parse_header_metadata(content or "") or {}
+    values: list[tuple[int, str]] = []
+    for key, value in metadata.items():
+        match = re.fullmatch(r"docid(\d*)", key.strip(), flags=re.IGNORECASE)
+        if match and value.strip():
+            values.append((_docid_sort_key(match.group(1)), value.strip()))
+    return [value for _, value in sorted(values)]
+
+
+def _find_header_template_end(lines: list[str]) -> Optional[int]:
+    in_header = False
+    for index, line in enumerate(lines):
+        stripped = line.strip().lower()
+        if not in_header and stripped.startswith("{{header/裁判文书"):
+            in_header = True
+            continue
+        if in_header and stripped == "}}":
+            return index
+    return None
+
+
+def _merge_header_docids(existing_content: str, import_wikitext: str) -> str:
+    """Add missing imported docids to the existing header without changing article text."""
+    import_docids = _header_docids(import_wikitext)
+    if not import_docids:
+        return existing_content
+
+    existing_docids = _header_docids(existing_content)
+    missing_docids = [docid for docid in import_docids if docid not in existing_docids]
+    if not missing_docids:
+        return existing_content
+
+    lines = existing_content.split("\n")
+
+    def collect_docid_lines() -> dict[int, tuple[int, re.Match[str]]]:
+        docid_lines: dict[int, tuple[int, re.Match[str]]] = {}
+        for index, line in enumerate(lines):
+            match = HEADER_DOCID_PARAM_RE.match(line)
+            if not match:
+                continue
+            suffix = match.group(2)
+            docid_lines[_docid_sort_key(suffix)] = (index, match)
+        return docid_lines
+
+    for docid in missing_docids:
+        docid_lines = collect_docid_lines()
+        empty_param_key = None
+        for key in sorted(docid_lines):
+            _, match = docid_lines[key]
+            if not match.group(4).strip():
+                empty_param_key = key
+                break
+
+        if empty_param_key is not None:
+            index, match = docid_lines[empty_param_key]
+            lines[index] = f"{match.group(1)}{match.group(2)}{match.group(3)}{docid}{match.group(5)}"
+            continue
+
+        if docid_lines:
+            next_key = 2
+            while next_key in docid_lines:
+                next_key += 1
+            insert_index = max(index for index, _ in docid_lines.values()) + 1
+            lines.insert(insert_index, f"|docid{next_key} = {docid}")
+            continue
+
+        header_end = _find_header_template_end(lines)
+        if header_end is None:
+            return existing_content
+        lines.insert(header_end, f"|docid = {docid}")
+
+    return "\n".join(lines)
 
 
 def _append_message(message: str, extra: str) -> str:
@@ -212,6 +307,32 @@ def _emit_verbose_result(
 def _is_header_landing_page(page_state) -> bool:
     """Return whether a resolved page lands on a real court-document page."""
     return bool(page_state and page_state.exists and page_state.content and is_header_page(page_state.content))
+
+
+def _header_title_display(value: str) -> str:
+    """Return the displayed canonical title from a plain or linked header title."""
+    value = (value or "").strip()
+    match = WIKILINK_RE.match(value)
+    if match:
+        return (match.group(2) or match.group(1)).strip()
+    return value
+
+
+def _replace_header_title(content: str, title_value: str) -> str:
+    """Replace the first Header/裁判文书 title parameter value."""
+    if HEADER_TITLE_PARAM_LINE_RE.search(content or ""):
+        return HEADER_TITLE_PARAM_LINE_RE.sub(
+            lambda match: f"{match.group(1)}{title_value}",
+            content,
+            count=1,
+        )
+    return content
+
+
+def _same_case_title_link(case_title: str, canonical_title: str) -> str:
+    if canonical_title == case_title:
+        return f"[[{case_title}]]"
+    return f"[[{case_title}|{canonical_title}]]"
 
 
 def ensure_case_number_redirect(
@@ -432,16 +553,24 @@ def _hide_overwrite_revision_for_review(
         )
 
     if _wikitexts_match_ignoring_non_revision_metadata(import_text, existing_for_decision):
-        if existing_changed_safely:
+        existing_with_merged_docids = _merge_header_docids(existing_for_decision, import_wikitext)
+        docids_changed = not wikitexts_match(existing_with_merged_docids, existing_for_decision)
+        if existing_changed_safely or docids_changed:
+            if existing_changed_safely and docids_changed:
+                reason = "Saved existing-page metadata normalization and merged duplicate document docid without overwrite"
+            elif docids_changed:
+                reason = "Merged duplicate document docid into existing page without overwrite"
+            else:
+                reason = "Saved existing-page metadata normalization without overwrite"
             return _save_safe_existing_update(
                 source_title=source_title,
                 target_title=target_title,
                 wenshu_id=wenshu_id,
-                content=existing_for_decision,
+                content=existing_with_merged_docids,
                 case_title=case_title,
                 message=message,
                 timestamp=timestamp,
-                reason="Saved existing-page metadata normalization without overwrite",
+                reason=reason,
             )
         return _build_no_overwrite_result(
             source_title=source_title,
@@ -664,6 +793,284 @@ def _handle_existing_case_header_page(
     )
 
 
+def _handle_same_case_number_different_canonical_title(
+    *,
+    source_title: str,
+    wenshu_id: str,
+    import_wikitext: str,
+    case_title: Optional[str],
+    page_state: object,
+    message: str,
+    timestamp: str,
+) -> Optional[UploadResult]:
+    """
+    Split rare same-case-number collisions by canonical title.
+
+    When the case-number title already lands on a Header page with the same
+    court+案号+type identity but a different Header title, keep each document at
+    its displayed canonical title and turn the case-number title into a
+    disambiguation page.
+    """
+    if not case_title or not _is_header_landing_page(page_state):
+        return None
+
+    existing_content = getattr(page_state, "content", None) or ""
+    existing_metadata = parse_header_metadata(existing_content) or {}
+    draft_metadata = parse_header_metadata(import_wikitext) or {}
+    if not existing_metadata or not draft_metadata:
+        return None
+
+    existing_case_title = build_case_title_from_metadata(existing_metadata)
+    draft_case_title = build_case_title_from_metadata(draft_metadata)
+    if existing_case_title != case_title or draft_case_title != case_title:
+        return None
+
+    existing_case_number = build_case_number_from_metadata(existing_metadata)
+    draft_case_number = build_case_number_from_metadata(draft_metadata)
+    if not existing_case_number or existing_case_number != draft_case_number:
+        return None
+
+    existing_canonical_title = _header_title_display(existing_metadata.get("title", ""))
+    draft_canonical_title = _header_title_display(draft_metadata.get("title", "")) or source_title
+    if not existing_canonical_title or not draft_canonical_title:
+        return None
+    if existing_canonical_title == draft_canonical_title:
+        return None
+
+    existing_court = normalize_court_name(existing_metadata.get("court", ""))
+    draft_court = normalize_court_name(draft_metadata.get("court", ""))
+    existing_type = normalize_doc_type(existing_metadata.get("type", ""))
+    draft_type = normalize_doc_type(draft_metadata.get("type", ""))
+    if not existing_court or not existing_type or existing_court != draft_court or existing_type != draft_type:
+        return None
+
+    try:
+        existing_target_title = _ensure_existing_same_case_canonical_page(
+            case_title=case_title,
+            existing_canonical_title=existing_canonical_title,
+            page_state=page_state,
+        )
+
+        draft_target_state = resolve_page(draft_canonical_title)
+        if draft_target_state.exists:
+            return UploadResult(
+                title=source_title,
+                wenshu_id=wenshu_id,
+                status='failed',
+                final_title=draft_canonical_title,
+                case_title=case_title,
+                message=f"Same-case canonical title already exists: {draft_canonical_title}",
+                timestamp=timestamp,
+            )
+
+        updated_existing = _replace_header_title(
+            existing_content,
+            _same_case_title_link(case_title, existing_canonical_title),
+        )
+        save_page(
+            existing_target_title,
+            updated_existing,
+            "更新标题链接至案号消歧义页",
+        )
+
+        updated_import = _replace_header_title(
+            import_wikitext,
+            _same_case_title_link(case_title, draft_canonical_title),
+        )
+        save_page(
+            draft_canonical_title,
+            updated_import,
+            build_edit_summary(wenshu_id),
+        )
+
+        disambiguation = build_versions_page_content(
+            title=case_title,
+            noauthor=existing_court,
+            entry_titles=[existing_target_title, draft_canonical_title],
+            header_type=existing_type,
+        )
+        save_page(
+            case_title,
+            disambiguation,
+            "创建案号消歧义页",
+        )
+    except Exception as e:
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='failed',
+            final_title=draft_canonical_title,
+            case_title=case_title,
+            message=f"Failed to resolve same-case canonical-title split: {e}",
+            timestamp=timestamp,
+        )
+
+    return UploadResult(
+        title=source_title,
+        wenshu_id=wenshu_id,
+        status='conflict_resolved',
+        final_title=draft_canonical_title,
+        case_title=case_title,
+        redirect_status='disambiguation_created',
+        message=_append_message(message, "Resolved same case number with different canonical titles"),
+        timestamp=timestamp,
+    )
+
+
+def _handle_same_case_number_disambiguation_page(
+    *,
+    source_title: str,
+    wenshu_id: str,
+    import_wikitext: str,
+    case_title: Optional[str],
+    page_state: object,
+    message: str,
+    timestamp: str,
+) -> Optional[UploadResult]:
+    """Add a canonical-title entry when the same-case-number page is already a disambiguation page."""
+    if not case_title or not page_state or not getattr(page_state, "exists", False):
+        return None
+
+    existing_content = getattr(page_state, "content", None) or ""
+    if not is_versions_page(existing_content):
+        return None
+
+    draft_metadata = parse_header_metadata(import_wikitext) or {}
+    if not draft_metadata:
+        return None
+
+    draft_case_title = build_case_title_from_metadata(draft_metadata)
+    if draft_case_title != case_title:
+        return None
+
+    draft_canonical_title = _header_title_display(draft_metadata.get("title", "")) or source_title
+    if not draft_canonical_title or draft_canonical_title == case_title:
+        return None
+
+    draft_court = normalize_court_name(draft_metadata.get("court", ""))
+    draft_type = normalize_doc_type(draft_metadata.get("type", ""))
+    if not draft_court or not draft_type:
+        return None
+
+    try:
+        draft_target_state = resolve_page(draft_canonical_title)
+        if draft_target_state.exists:
+            return UploadResult(
+                title=source_title,
+                wenshu_id=wenshu_id,
+                status='failed',
+                final_title=draft_canonical_title,
+                case_title=case_title,
+                message=f"Same-case canonical title already exists: {draft_canonical_title}",
+                timestamp=timestamp,
+            )
+
+        updated_import = _replace_header_title(
+            import_wikitext,
+            _same_case_title_link(case_title, draft_canonical_title),
+        )
+        save_page(
+            draft_canonical_title,
+            updated_import,
+            build_edit_summary(wenshu_id),
+        )
+
+        updated_disambiguation = add_entry_to_versions_page(
+            existing_content,
+            draft_canonical_title,
+            new_entry_court=draft_court,
+            header_type=draft_type,
+        )
+        if not wikitexts_match(updated_disambiguation, existing_content):
+            save_page(
+                case_title,
+                updated_disambiguation,
+                "添加同案号标题条目",
+            )
+    except Exception as e:
+        return UploadResult(
+            title=source_title,
+            wenshu_id=wenshu_id,
+            status='failed',
+            final_title=draft_canonical_title,
+            case_title=case_title,
+            message=f"Failed to add same-case canonical title to disambiguation page: {e}",
+            timestamp=timestamp,
+        )
+
+    return UploadResult(
+        title=source_title,
+        wenshu_id=wenshu_id,
+        status='conflict_resolved',
+        final_title=draft_canonical_title,
+        case_title=case_title,
+        redirect_status='disambiguation_updated',
+        message=_append_message(message, "Added same case number canonical title to disambiguation page"),
+        timestamp=timestamp,
+    )
+
+
+def _handle_same_case_number_existing_page(
+    *,
+    source_title: str,
+    wenshu_id: str,
+    import_wikitext: str,
+    case_title: Optional[str],
+    page_state: object,
+    message: str,
+    timestamp: str,
+) -> Optional[UploadResult]:
+    """Handle rare same-case-number collisions before falling back to overwrite review."""
+    for handler in (
+        _handle_same_case_number_different_canonical_title,
+        _handle_same_case_number_disambiguation_page,
+    ):
+        result = handler(
+            source_title=source_title,
+            wenshu_id=wenshu_id,
+            import_wikitext=import_wikitext,
+            case_title=case_title,
+            page_state=page_state,
+            message=message,
+            timestamp=timestamp,
+        )
+        if result:
+            return result
+    return None
+
+
+def _ensure_existing_same_case_canonical_page(
+    *,
+    case_title: str,
+    existing_canonical_title: str,
+    page_state: object,
+) -> str:
+    """Move a direct case-number document to its canonical title when needed."""
+    resolved_title = getattr(page_state, "resolved_title", None) or case_title
+    is_redirect = bool(getattr(page_state, "is_redirect", False))
+
+    if is_redirect and resolved_title:
+        return resolved_title
+
+    if resolved_title != case_title:
+        return resolved_title
+
+    if existing_canonical_title == case_title:
+        raise RuntimeError("existing canonical title is the case-number title")
+
+    target_state = resolve_page(existing_canonical_title)
+    if target_state.exists:
+        raise RuntimeError(f"existing canonical title already exists: [[{existing_canonical_title}]]")
+
+    conflict_resolution_module.move_page(
+        case_title,
+        existing_canonical_title,
+        reason="移动至标题页面，案号页改为消歧义页",
+        leave_redirect=True,
+    )
+    return existing_canonical_title
+
+
 def upload_document(
     title: str,
     wenshu_id: str,
@@ -788,6 +1195,18 @@ def upload_document(
                                 else:
                                     new_page = resolve_page(new_title)
                                 if new_page.exists:
+                                    same_case_result = _handle_same_case_number_existing_page(
+                                        source_title=title,
+                                        wenshu_id=wenshu_id,
+                                        import_wikitext=updated_wikitext,
+                                        case_title=new_title,
+                                        page_state=new_page,
+                                        message=f"Case-specific page already exists: {new_page.resolved_title or new_title}",
+                                        timestamp=timestamp,
+                                    )
+                                    if same_case_result:
+                                        return same_case_result
+
                                     case_header_result = _handle_existing_case_header_page(
                                         source_title=title,
                                         wenshu_id=wenshu_id,
@@ -863,6 +1282,18 @@ def upload_document(
                                 timestamp=timestamp,
                             )
                     else:
+                        same_case_result = _handle_same_case_number_existing_page(
+                            source_title=title,
+                            wenshu_id=wenshu_id,
+                            import_wikitext=wikitext,
+                            case_title=case_title,
+                            page_state=case_page,
+                            message=f"Case-number page already exists: {case_page.resolved_title if case_page else case_title}",
+                            timestamp=timestamp,
+                        )
+                        if same_case_result:
+                            return same_case_result
+
                         case_header_result = _handle_existing_case_header_page(
                             source_title=title,
                             wenshu_id=wenshu_id,
@@ -928,6 +1359,18 @@ def upload_document(
             )
     
     # Page doesn't exist - create it
+    same_case_result = _handle_same_case_number_existing_page(
+        source_title=title,
+        wenshu_id=wenshu_id,
+        import_wikitext=wikitext,
+        case_title=case_title,
+        page_state=case_page,
+        message=f"Case-number page already exists: {case_page.resolved_title if case_page else case_title}",
+        timestamp=timestamp,
+    )
+    if same_case_result:
+        return same_case_result
+
     case_header_result = _handle_existing_case_header_page(
         source_title=title,
         wenshu_id=wenshu_id,

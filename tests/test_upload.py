@@ -355,6 +355,137 @@ def test_upload_document_reverts_overwrite_for_same_case_number_with_different_m
     assert saves[1][2] == uploader.build_manual_revert_summary("doc-1")
 
 
+def test_upload_document_splits_same_case_number_different_canonical_title(monkeypatch):
+    draft_title = "郭某某危险驾驶罪刑事一审刑事判决书"
+    existing_title = "丁某某危险驾驶罪刑事一审刑事判决书"
+    case_title = "甲法院（2024）甲01刑初1号刑事判决书"
+    draft_wikitext = make_header_page(
+        title=draft_title,
+        court="甲法院",
+        doc_type="刑事判决书",
+        case_number="（2024）甲01刑初1号",
+    ).replace("|docid = doc-1", "|docid = doc-2")
+    existing_content = make_header_page(
+        title=existing_title,
+        court="甲法院",
+        doc_type="刑事判决书",
+        case_number="（2024）甲01刑初1号",
+    )
+    saves = []
+    moves = []
+
+    def fake_resolve_page(requested_title):
+        if requested_title == case_title:
+            return ResolvedPage(
+                requested_title=requested_title,
+                exists=True,
+                resolved_title=case_title,
+                content=existing_content,
+            )
+        if requested_title in {existing_title, draft_title}:
+            return ResolvedPage(requested_title=requested_title, exists=False)
+        raise AssertionError(f"unexpected resolve_page title: {requested_title}")
+
+    monkeypatch.setattr(uploader, "resolve_page", fake_resolve_page)
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (False, None))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+    monkeypatch.setattr(
+        uploader.conflict_resolution_module,
+        "move_page",
+        lambda *args, **kwargs: moves.append((args, kwargs)) or True,
+    )
+
+    result = uploader.upload_document(title=draft_title, wenshu_id="doc-2", wikitext=draft_wikitext)
+
+    assert result.status == "conflict_resolved"
+    assert result.final_title == draft_title
+    assert result.case_title == case_title
+    assert result.redirect_status == "disambiguation_created"
+    assert result.message == (
+        f"Case-number page already exists: {case_title}; "
+        "Resolved same case number with different canonical titles"
+    )
+
+    assert moves == [
+        (
+            (case_title, existing_title),
+            {"reason": "移动至标题页面，案号页改为消歧义页", "leave_redirect": True},
+        )
+    ]
+    assert [save[0] for save in saves] == [existing_title, draft_title, case_title]
+    assert f"|title = [[{case_title}|{existing_title}]]" in saves[0][1]
+    assert f"|title = [[{case_title}|{draft_title}]]" in saves[1][1]
+    assert saves[2][1] == dedent(
+        f"""\
+        {{{{裁判文书消歧义页
+         | title      = {case_title}
+         | court      = 甲法院
+         | type       = 刑事判决书
+        }}}}
+        * [[{existing_title}]]
+        * [[{draft_title}]]
+        """
+    )
+
+
+def test_upload_document_adds_same_case_number_canonical_title_to_existing_disambiguation(monkeypatch):
+    draft_title = "郭某某危险驾驶罪刑事一审刑事判决书"
+    existing_title = "丁某某危险驾驶罪刑事一审刑事判决书"
+    case_title = "甲法院（2024）甲01刑初1号刑事判决书"
+    draft_wikitext = make_header_page(
+        title=draft_title,
+        court="甲法院",
+        doc_type="刑事判决书",
+        case_number="（2024）甲01刑初1号",
+    ).replace("|docid = doc-1", "|docid = doc-2")
+    existing_disambiguation = dedent(
+        f"""\
+        {{{{裁判文书消歧义页
+         | title      = {case_title}
+         | court      = 甲法院
+         | type       = 刑事判决书
+        }}}}
+        * [[{existing_title}]]
+        """
+    )
+    saves = []
+    moves = []
+
+    def fake_resolve_page(requested_title):
+        if requested_title == case_title:
+            return ResolvedPage(
+                requested_title=requested_title,
+                exists=True,
+                resolved_title=case_title,
+                content=existing_disambiguation,
+            )
+        if requested_title == draft_title:
+            return ResolvedPage(requested_title=requested_title, exists=False)
+        raise AssertionError(f"unexpected resolve_page title: {requested_title}")
+
+    monkeypatch.setattr(uploader, "resolve_page", fake_resolve_page)
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (False, None))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+    monkeypatch.setattr(
+        uploader.conflict_resolution_module,
+        "move_page",
+        lambda *args, **kwargs: moves.append((args, kwargs)) or True,
+    )
+
+    result = uploader.upload_document(title=draft_title, wenshu_id="doc-2", wikitext=draft_wikitext)
+
+    assert result.status == "conflict_resolved"
+    assert result.final_title == draft_title
+    assert result.case_title == case_title
+    assert result.redirect_status == "disambiguation_updated"
+    assert "Added same case number canonical title to disambiguation page" in result.message
+    assert moves == []
+    assert [save[0] for save in saves] == [draft_title, case_title]
+    assert f"|title = [[{case_title}|{draft_title}]]" in saves[0][1]
+    assert f"* [[{existing_title}]]" in saves[1][1]
+    assert f"* [[{draft_title}]]" in saves[1][1]
+
+
 def test_upload_document_hides_overwritable_revision_with_review_category(monkeypatch):
     title = "张三与李四民事判决书"
     wikitext = make_header_page(
@@ -390,7 +521,7 @@ def test_upload_document_hides_overwritable_revision_with_review_category(monkey
     assert saves[1][2] == uploader.build_manual_revert_summary("doc-1")
 
 
-def test_upload_document_skips_docid_only_difference_without_overwrite(monkeypatch):
+def test_upload_document_merges_docid_only_difference_without_overwrite(monkeypatch):
     title = "张三与李四民事判决书"
     wikitext = make_header_page(
         title=title,
@@ -399,6 +530,37 @@ def test_upload_document_skips_docid_only_difference_without_overwrite(monkeypat
         case_number="（2024）京01民终1号",
     )
     existing_content = wikitext.replace("|docid = doc-1", "|docid = old-doc")
+    saves = []
+
+    monkeypatch.setattr(
+        uploader,
+        "resolve_page",
+        lambda requested_title: ResolvedPage(requested_title=requested_title, exists=False),
+    )
+    monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
+    monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
+
+    result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
+
+    assert result.status == "uploaded"
+    assert result.final_title == title
+    assert "Merged duplicate document docid" in result.message
+    assert len(saves) == 1
+    assert saves[0][0] == title
+    assert "|docid = old-doc\n|docid2 = doc-1\n}}" in saves[0][1]
+    assert saves[0][2] == uploader.build_edit_summary("doc-1")
+
+
+def test_upload_document_skips_when_import_docid_is_already_docid2(monkeypatch):
+    title = "张三与李四民事判决书"
+    wikitext = make_header_page(
+        title=title,
+        court="北京市第一中级人民法院",
+        doc_type="民事判决书",
+        case_number="（2024）京01民终1号",
+    )
+    existing_content = wikitext.replace("|docid = doc-1", "|docid = old-doc\n|docid2 = doc-1")
 
     monkeypatch.setattr(
         uploader,
@@ -450,7 +612,7 @@ def test_upload_document_skips_unchecked_category_only_difference_without_overwr
     assert "docid or unchecked-overwrite category metadata" in result.message
 
 
-def test_upload_document_skips_docid_and_unchecked_category_difference_without_overwrite(monkeypatch):
+def test_upload_document_merges_docid_and_keeps_unchecked_category_without_overwrite(monkeypatch):
     title = "张三与李四民事判决书"
     wikitext = make_header_page(
         title=title,
@@ -460,6 +622,7 @@ def test_upload_document_skips_docid_and_unchecked_category_difference_without_o
     )
     existing_content = wikitext.replace("|docid = doc-1", "|docid = old-doc")
     existing_content = f"{existing_content.rstrip()}\n[[Category:覆盖版本未检查的裁判文书]]\n"
+    saves = []
 
     monkeypatch.setattr(
         uploader,
@@ -468,17 +631,16 @@ def test_upload_document_skips_docid_and_unchecked_category_difference_without_o
     )
     monkeypatch.setattr(uploader, "check_page_exists", lambda requested_title: (True, 1))
     monkeypatch.setattr(uploader, "get_page_content", lambda requested_title: (True, existing_content))
-    monkeypatch.setattr(
-        uploader,
-        "save_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("save_page should not be called")),
-    )
+    monkeypatch.setattr(uploader, "save_page", lambda *args, **kwargs: saves.append(args) or True)
 
     result = uploader.upload_document(title=title, wenshu_id="doc-1", wikitext=wikitext)
 
-    assert result.status == "skipped"
+    assert result.status == "uploaded"
     assert result.final_title == title
-    assert "docid or unchecked-overwrite category metadata" in result.message
+    assert "Merged duplicate document docid" in result.message
+    assert len(saves) == 1
+    assert "|docid = old-doc\n|docid2 = doc-1\n}}" in saves[0][1]
+    assert saves[0][1].rstrip().endswith("[[Category:覆盖版本未检查的裁判文书]]")
 
 
 def test_upload_document_keeps_safe_header_param_fill_without_review_category(monkeypatch):
