@@ -596,5 +596,8 @@ def configure_throttle(interval: float = DEFAULT_EDIT_INTERVAL, maxlag: int = DE
         interval: Minimum seconds between edits (put_throttle)
         maxlag: Server lag threshold for API requests
     """
-    pywikibot.config.put_throttle = float(interval)
+    interval = float(interval)
+    pywikibot.config.put_throttle = interval
     pywikibot.config.maxlag = maxlag
+    if _site is not None:
+        _site.throttle.set_delays(writedelay=interval)
