@@ -42,7 +42,9 @@ CATEGORY_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 YEAR_TYPE_CATEGORY_RE = re.compile(r"^(\d{4})年(?:中华人民共和国)?(.+)$")
-ENTRY_LINE_RE = re.compile(r"\s*\*\s*\[\[([^\]]+)\]\]")
+ENTRY_LINE_RE = re.compile(r"\s*\*+\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
+ENTRY_LINE_WITH_DEPTH_RE = re.compile(r"\s*(\*+)\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
+TOP_LEVEL_ENTRY_LINE_RE = re.compile(r"\s*\*\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
 SECTION_HEADING_RE = re.compile(r"^\s*==\s*(.*?)\s*==\s*$")
 CASE_NUMBER_SORT_RE = re.compile(r"^(.*?)(\d+)号(.*)$")
 
@@ -244,6 +246,15 @@ def extract_versions_entries(content: str) -> list[str]:
     return entries
 
 
+def has_nested_versions_entries(content: str) -> bool:
+    """Return whether a disambiguation page has nested bullet entries."""
+    for line in content.splitlines():
+        match = ENTRY_LINE_WITH_DEPTH_RE.match(line)
+        if match and len(match.group(1)) > 1:
+            return True
+    return False
+
+
 def extract_grouped_versions_entries(content: str, default_court: Optional[str] = None) -> dict[str, list[str]]:
     """Extract disambiguation entries grouped by court heading or default court."""
     grouped_entries: dict[str, list[str]] = {}
@@ -261,6 +272,105 @@ def extract_grouped_versions_entries(content: str, default_court: Optional[str] 
             grouped_entries.setdefault(current_court, []).append(entry_match.group(1).strip())
 
     return grouped_entries
+
+
+def _find_court_section_bounds(lines: list[str], court: str) -> Optional[tuple[int, int]]:
+    """Return the body bounds for a court heading section."""
+    for index, line in enumerate(lines):
+        heading_match = SECTION_HEADING_RE.match(line)
+        if not heading_match or heading_match.group(1).strip() != court:
+            continue
+        end = len(lines)
+        for next_index in range(index + 1, len(lines)):
+            if SECTION_HEADING_RE.match(lines[next_index]):
+                end = next_index
+                break
+        return index + 1, end
+    return None
+
+
+def _find_template_body_start(lines: list[str]) -> int:
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "}}" or stripped.endswith("}}"):
+            return index + 1
+    return 0
+
+
+def _find_top_level_entry_insert_index(
+    lines: list[str],
+    start: int,
+    end: int,
+    new_entry_title: str,
+) -> int:
+    """Find an insertion point that keeps top-level entries sorted."""
+    new_sort_key = case_number_sort_key(new_entry_title)
+    last_entry_block_end: Optional[int] = None
+
+    index = start
+    while index < end:
+        match = TOP_LEVEL_ENTRY_LINE_RE.match(lines[index])
+        if not match:
+            index += 1
+            continue
+
+        if new_sort_key < case_number_sort_key(match.group(1).strip()):
+            return index
+
+        block_end = index + 1
+        while block_end < end:
+            child_match = ENTRY_LINE_WITH_DEPTH_RE.match(lines[block_end])
+            if not child_match or len(child_match.group(1)) <= 1:
+                break
+            block_end += 1
+        last_entry_block_end = block_end
+        index = block_end
+
+    return last_entry_block_end if last_entry_block_end is not None else end
+
+
+def _add_entry_preserving_versions_structure(
+    content: str,
+    new_entry_title: str,
+    new_entry_court: Optional[str],
+) -> str:
+    """Add an entry without flattening existing nested disambiguation bullets."""
+    existing_entries = extract_versions_entries(content)
+    if has_entry_with_same_case_number(existing_entries, new_entry_title):
+        return content
+
+    lines = content.split("\n")
+    insert_index: Optional[int] = None
+
+    if new_entry_court:
+        bounds = _find_court_section_bounds(lines, new_entry_court)
+        if bounds:
+            insert_index = _find_top_level_entry_insert_index(
+                lines,
+                bounds[0],
+                bounds[1],
+                new_entry_title,
+            )
+        elif any(SECTION_HEADING_RE.match(line) for line in lines):
+            lines.append(f"=={new_entry_court}==")
+            lines.append(f"[[Category:{new_entry_court}]]")
+            lines.append(f"* [[{new_entry_title}]]")
+            return "\n".join(lines)
+
+    if insert_index is None:
+        start = _find_template_body_start(lines)
+        end = next(
+            (
+                index
+                for index in range(start, len(lines))
+                if lines[index].strip().startswith("[[Category:")
+            ),
+            len(lines),
+        )
+        insert_index = _find_top_level_entry_insert_index(lines, start, end, new_entry_title)
+
+    lines.insert(insert_index, f"* [[{new_entry_title}]]")
+    return "\n".join(lines)
 
 
 def extract_category_titles(content: str) -> list[str]:
@@ -331,12 +441,15 @@ def add_entry_to_versions_page(
     title = metadata.get("title", "").strip()
     existing_court = normalize_court_name(metadata.get("court", "") or metadata.get("noauthor", ""))
     page_type = normalize_doc_type(metadata.get("type", "") or header_type or "")
+    has_nested_entries = has_nested_versions_entries(content)
 
     if title and page_type:
         if existing_court and new_entry_court and existing_court != new_entry_court:
             grouped_entries = extract_grouped_versions_entries(content, default_court=existing_court)
             if grouped_entries_have_case_number(grouped_entries, new_entry_title):
                 return content
+            if has_nested_entries:
+                return _add_entry_preserving_versions_structure(content, new_entry_title, new_entry_court)
             grouped_entries.setdefault(new_entry_court, []).append(new_entry_title)
             return build_grouped_versions_page_content(
                 title=title,
@@ -352,8 +465,11 @@ def add_entry_to_versions_page(
                 inferred_court = infer_court_from_case_title(entry)
                 if inferred_court:
                     grouped_entries.setdefault(inferred_court, []).append(entry)
-            if not grouped_entries_have_case_number(grouped_entries, new_entry_title):
-                grouped_entries.setdefault(effective_new_entry_court, []).append(new_entry_title)
+            if grouped_entries_have_case_number(grouped_entries, new_entry_title):
+                return content
+            if has_nested_entries:
+                return _add_entry_preserving_versions_structure(content, new_entry_title, effective_new_entry_court)
+            grouped_entries.setdefault(effective_new_entry_court, []).append(new_entry_title)
             return build_grouped_versions_page_content(
                 title=title,
                 header_type=page_type,
@@ -361,6 +477,8 @@ def add_entry_to_versions_page(
             )
 
         if existing_court:
+            if has_nested_entries:
+                return _add_entry_preserving_versions_structure(content, new_entry_title, existing_court)
             all_entries = append_entry_if_new_case_number(extract_versions_entries(content), new_entry_title)
             return build_versions_page_content(
                 title=title,
@@ -375,11 +493,10 @@ def add_entry_to_versions_page(
     existing_entries = []
     entry_line_indices = []
     for i, line in enumerate(lines):
-        if line.strip().startswith("* [["):
-            match = ENTRY_LINE_RE.match(line)
-            if match:
-                existing_entries.append(match.group(1))
-                entry_line_indices.append(i)
+        match = ENTRY_LINE_RE.match(line)
+        if match:
+            existing_entries.append(match.group(1))
+            entry_line_indices.append(i)
 
     # Add new entry, deduplicate, and sort
     new_entry_already_present = has_entry_with_same_case_number(existing_entries, new_entry_title)

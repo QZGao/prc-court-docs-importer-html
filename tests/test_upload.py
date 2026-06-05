@@ -1499,6 +1499,107 @@ def test_versions_entries_sort_by_case_number_syntax():
     ]
 
 
+def test_versions_entry_extraction_reads_subentries():
+    case_title = "吉林省通榆县人民法院（2023）吉0822刑初196号刑事判决书"
+    li_title = f"{case_title} (李先继)"
+    wang_title = f"{case_title} (王宏亮)"
+    content = dedent(
+        f"""\
+        {{{{裁判文书消歧义页
+         | title      = 书文号、基本情况等危险驾驶罪刑事一审刑事判决书
+         | type       = 刑事判决书
+        }}}}
+        ==吉林省通榆县人民法院==
+        [[Category:吉林省通榆县人民法院]]
+        * [[{case_title}]]
+        ** [[{li_title}]]
+        ** [[{wang_title}]]
+        """
+    )
+
+    assert conflict_resolution.extract_versions_entries(content) == [
+        case_title,
+        li_title,
+        wang_title,
+    ]
+    assert conflict_resolution.extract_grouped_versions_entries(content) == {
+        "吉林省通榆县人民法院": [case_title, li_title, wang_title],
+    }
+
+
+def test_add_entry_to_versions_page_preserves_nested_subentries():
+    case_title = "吉林省通榆县人民法院（2023）吉0822刑初196号刑事判决书"
+    li_title = f"{case_title} (李先继)"
+    wang_title = f"{case_title} (王宏亮)"
+    new_case_title = "吉林省通榆县人民法院（2023）吉0822刑初198号刑事判决书"
+    content = dedent(
+        f"""\
+        {{{{裁判文书消歧义页
+         | title      = 书文号、基本情况等危险驾驶罪刑事一审刑事判决书
+         | type       = 刑事判决书
+        }}}}
+        ==吉林省通榆县人民法院==
+        [[Category:吉林省通榆县人民法院]]
+        * [[{case_title}]]
+        ** [[{li_title}]]
+        ** [[{wang_title}]]
+        """
+    )
+
+    updated = conflict_resolution.add_entry_to_versions_page(
+        content,
+        new_case_title,
+        new_entry_court="吉林省通榆县人民法院",
+        header_type="刑事判决书",
+    )
+
+    assert f"* [[{case_title}]]\n** [[{li_title}]]\n** [[{wang_title}]]" in updated
+    assert f"* [[{new_case_title}]]" in updated
+
+
+def test_try_resolve_conflict_treats_nested_same_case_entry_as_existing(monkeypatch):
+    original_title = "书文号、基本情况等危险驾驶罪刑事一审刑事判决书"
+    case_title = "吉林省通榆县人民法院（2023）吉0822刑初196号刑事判决书"
+    li_title = f"{case_title} (李先继)"
+    wang_title = f"{case_title} (王宏亮)"
+    draft_content = make_header_page(
+        title=f"[[{original_title}]]",
+        court="吉林省通榆县人民法院",
+        doc_type="刑事判决书",
+        case_number="（2023）吉0822刑初196号",
+        year="2023",
+    )
+    existing_content = dedent(
+        f"""\
+        {{{{裁判文书消歧义页
+         | title      = {original_title}
+         | type       = 刑事判决书
+        }}}}
+        ==吉林省通榆县人民法院==
+        [[Category:吉林省通榆县人民法院]]
+        * [[{case_title}]]
+        ** [[{li_title}]]
+        ** [[{wang_title}]]
+        """
+    )
+
+    monkeypatch.setattr(
+        conflict_resolution,
+        "save_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("save_page should not be called")),
+    )
+
+    resolved, new_title, error = conflict_resolution.try_resolve_conflict(
+        original_title=original_title,
+        draft_content=draft_content,
+        existing_content=existing_content,
+    )
+
+    assert resolved is True
+    assert new_title == case_title
+    assert error is None
+
+
 def test_try_resolve_conflict_removes_year_from_current_versions_page(monkeypatch):
     original_title = "共享标题"
     court = "北京市第一中级人民法院"

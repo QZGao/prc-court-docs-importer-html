@@ -181,45 +181,75 @@ NORMAL_SPLIT_TITLES = {
     "任某某、宋某某民事一审民事判决书",
     "何某1、何某2等机动车交通事故责任纠纷民事一审民事判决书",
     "侵害实用新型专利权纠纷一审民事判决书",
+    "刘某与张某运输合同纠纷一审民事判决书",
     "刘某与李某劳务合同纠纷一审民事判决书",
+    "刘某某、刘某等机动车交通事故责任纠纷民事一审民事判决书",
     "刘某某、季某某民间借贷纠纷民事一审民事判决书",
     "刘某金危险驾驶罪、危险驾驶罪刑事一审刑事判决书",
     "包头市某某物业服务有限责任公司、王某民事一审民事判决书",
     "包某林与杨某琼,任某飞民间借贷纠纷一审民事判决书",
     "卢某某民事一审民事判决书",
+    "台州某某公司、陈某某等申请支付令督促程序(支付令)民事令",
     "台州某某公司、李某某等申请支付令督促程序(支付令)民事令",
     "台州某某公司、王某某等申请支付令督促程序(支付令)民事令",
     "夏某、白某等机动车交通事故责任纠纷民事一审民事判决书",
+    "哈某某、××××人民检察院刑事一审刑事判决书",
+    "唐俊、宋长威等运输合同纠纷民事一审民事判决书",
     "张某、李某离婚纠纷民事一审民事判决书",
     "张某与田某买卖合同纠纷一审民事判决书",
     "张某某一审行政判决书",
     "徐某某、吴某某民间借贷纠纷民事一审民事判决书",
+    "岳某某、高某某民事一审民事判决书",
     "方某、公司A金融借款合同纠纷一审民事判决书",
     "李×、刘×劳务合同纠纷民事一审民事判决书",
+    "杜某某、孙某某民事一审民事判决书",
     "某公司甲与某公司乙建筑设备租赁合同纠纷一审民事判决书",
+    "某某公司、吴某民事一审民事判决书",
+    "某银行、许某某等民事一审民事判决书",
     "某某商业银行股份有限公司、陈某某申请支付令督促程序(支付令)民事令",
     "某银行股份有限公司重庆四公里支行与黄某信用卡纠纷一审民事判决书",
     "某银行股份有限公司重庆市分行与黄某某金融借款合同纠纷一审民事判决书",
     "沈阳某物业服务有限公司、金某物业服务合同纠纷民事一审民事判决书",
     "沈阳某物业管理有限公司、张某等物业服务合同纠纷民事一审民事判决书",
     "浙江磐安农村商业银行股份有限公司、羊元德等申请支付令督促程序(支付令)民事令",
+    "泽瑞万弘融资租赁(深圳)有限公司、岳洪江等民事执行实施类执行判决书",
+    "王某1、王某2等被继承人债务清偿纠纷民事二审民事判决书",
     "王某、韩某民间借贷纠纷民事一审民事判决书",
+    "王某、郝某某等民事一审民事判决书",
     "王某某、任某某民间借贷纠纷民事一审民事判决书",
     "秦某、郭某民事一审民事判决书",
+    "行政二审行政判决书",
+    "郭××与张××、××公司机动车交通事故责任纠纷一审民事判决书",
+    "陈某1、陈某2婚约财产纠纷民事一审民事判决书",
     "陈某某、高某某民间借贷纠纷民事一审民事判决书",
+    "马某某、周某某等民事一审民事判决书",
 }
 
 # Current article has no recoverable concrete case number in the visible source
 # text, so these are intentionally left in the maintenance category for manual
 # handling rather than inventing a case-number title.
-SKIP_REDACTED_CASE_TITLES = {
+SKIP_REDACTED_CASE_TITLES: set[str] = set()
+
+SAME_CASE_SAME_TITLE_STORAGE_SPLITS = {
+    "吉林省通榆县人民法院（2023）吉0822刑初196号刑事判决书": {
+        "broader_title": "书文号、基本情况等危险驾驶罪刑事一审刑事判决书",
+        "current_storage_title": "吉林省通榆县人民法院（2023）吉0822刑初196号刑事判决书 (李先继)",
+        "import_storage_titles_by_docid": {
+            "752464f6fc530fd3d93c0f783c5ab425": "吉林省通榆县人民法院（2023）吉0822刑初196号刑事判决书 (王宏亮)",
+        },
+    },
 }
 
-PARTIAL_EMPTY_CURRENT_SAME_CASE_TITLES = {
-}
+PARTIAL_EMPTY_CURRENT_SAME_CASE_TITLES: set[str] = set()
 
 # Known current-page metadata that cannot be inferred safely from headers alone.
 CURRENT_METADATA_OVERRIDES = {
+    "刘某与张某运输合同纠纷一审民事判决书": {
+        "案号": "（2024）赣0983民初1413号",
+    },
+    "刘某某、刘某等机动车交通事故责任纠纷民事一审民事判决书": {
+        "type": "民事判决书",
+    },
     "于某某、金某某民间借贷纠纷民事一审民事判决书": {
         "court": "内蒙古自治区开鲁县人民法院",
         "type": "民事判决书",
@@ -400,6 +430,9 @@ CURRENT_METADATA_OVERRIDES = {
         "day": "26",
         "loc": "辽宁省沈阳市",
     },
+    "王某1、王某2等被继承人债务清偿纠纷民事二审民事判决书": {
+        "type": "民事判决书",
+    },
     "王某、韩某民间借贷纠纷民事一审民事判决书": {
         "court": "甘肃省漳县人民法院",
         "type": "民事判决书",
@@ -426,6 +459,9 @@ CURRENT_METADATA_OVERRIDES = {
         "month": "9",
         "day": "27",
         "loc": "内蒙古自治区鄂托克旗",
+    },
+    "陈某1、陈某2婚约财产纠纷民事一审民事判决书": {
+        "type": "民事判决书",
     },
     "陈某某、高某某民间借贷纠纷民事一审民事判决书": {
         "court": "江苏省常州市武进区人民法院",
@@ -523,7 +559,14 @@ class Resolver:
 
     def run(self) -> None:
         titles = self.fetch_category_titles()
-        configured = MERGE_TITLES | NORMAL_SPLIT_TITLES | SAME_CASE_SPLIT_TITLES
+        configured = (
+            MERGE_TITLES
+            | NORMAL_SPLIT_TITLES
+            | SAME_CASE_SPLIT_TITLES
+            | set(SAME_CASE_SAME_TITLE_STORAGE_SPLITS)
+            | PARTIAL_EMPTY_CURRENT_SAME_CASE_TITLES
+            | SKIP_REDACTED_CASE_TITLES
+        )
         missing = [title for title in titles if title not in configured]
         if missing:
             raise RuntimeError(f"unclassified pages: {missing}")
@@ -533,7 +576,10 @@ class Resolver:
                 continue
             print(f"\n[{index}/{len(titles)}] [[{title}]]")
             try:
-                if title in SKIP_REDACTED_CASE_TITLES:
+                if title in SAME_CASE_SAME_TITLE_STORAGE_SPLITS:
+                    self.resolve_same_case_same_title_storage_split(title)
+                    action = "same_case_same_title_storage_split"
+                elif title in SKIP_REDACTED_CASE_TITLES:
                     print("    skip: current page has no recoverable concrete case number")
                     action = "skip_redacted_case_number"
                 elif title in PARTIAL_EMPTY_CURRENT_SAME_CASE_TITLES:
@@ -781,6 +827,80 @@ class Resolver:
             header_type=current_metadata["type"],
         )
         self.save(case_title, disambig_text, "创建消歧义页")
+
+    def resolve_same_case_same_title_storage_split(self, title: str) -> None:
+        config = SAME_CASE_SAME_TITLE_STORAGE_SPLITS[title]
+        revisions = self.fetch_revisions(title)
+        current = revisions[0]
+        current_metadata = dict(current.metadata)
+        current_metadata.update(CURRENT_METADATA_OVERRIDES.get(title, {}))
+        case_title = require_case_title(current_metadata, title)
+        if case_title != title:
+            raise RuntimeError(f"storage split case title mismatch: {case_title}")
+
+        current_storage_title = config["current_storage_title"]
+        current_text = rebuild_page(current.text, current_metadata, remove_intro=True)
+        imports = self.import_revisions(revisions, {current_metadata.get("docid", ""), current_metadata.get("docid2", "")})
+        if not imports:
+            raise RuntimeError("same-case same-title split has no import revisions")
+
+        import_pages: list[PreparedPage] = []
+        storage_by_docid = config["import_storage_titles_by_docid"]
+        for revision in imports:
+            metadata = dict(revision.metadata)
+            import_case_title = require_case_title(metadata, title)
+            if import_case_title != case_title:
+                raise RuntimeError(f"same-case same-title split import has different case title: {import_case_title}")
+            docid = metadata.get("docid", "")
+            storage_title = storage_by_docid.get(docid)
+            if not storage_title:
+                raise RuntimeError(f"no storage title configured for import docid: {docid or revision.revid}")
+            import_pages.append(
+                PreparedPage(
+                    title=storage_title,
+                    text=rebuild_page(revision.text, metadata, remove_intro=True),
+                    metadata=metadata,
+                    case_title=case_title,
+                )
+            )
+
+        entries = [current_storage_title] + [page.title for page in import_pages]
+        print(f"    current -> [[{current_storage_title}]]")
+        for page in import_pages:
+            print(f"    import -> [[{page.title}]]")
+        print(f"    case-number disambig [[{case_title}]]")
+        print(f"    broader disambig [[{config['broader_title']}]]")
+
+        self.move(title, current_storage_title)
+        self.save(current_storage_title, current_text)
+        for page in import_pages:
+            self.create(page.title, page.text, "救回覆盖导入版本")
+
+        disambig_text = build_versions_page_content(
+            title=case_title,
+            noauthor=current_metadata["court"],
+            entry_titles=entries,
+            header_type=current_metadata["type"],
+        )
+        self.save(case_title, disambig_text, "创建消歧义页")
+        self.update_broader_disambig_subentries(config["broader_title"], case_title, entries)
+
+    def update_broader_disambig_subentries(self, broader_title: str, case_title: str, entries: list[str]) -> None:
+        page = pywikibot.Page(self.site, broader_title)
+        if not page.exists():
+            raise RuntimeError(f"broader disambiguation page does not exist: [[{broader_title}]]")
+        if page.isRedirectPage():
+            raise RuntimeError(f"broader disambiguation page is a redirect: [[{broader_title}]]")
+
+        old_line = f"* [[{case_title}]]"
+        new_block = "\n".join([old_line, *(f"** [[{entry}]]" for entry in entries)])
+        text = page.text
+        if new_block in text:
+            print("    broader disambig already has subentries")
+            return
+        if old_line not in text:
+            raise RuntimeError(f"case title entry missing from broader disambiguation page: [[{case_title}]]")
+        self.save(broader_title, text.replace(old_line, new_block, 1), "更新裁判文书消歧义页条目")
 
     def prepare_page(
         self,
