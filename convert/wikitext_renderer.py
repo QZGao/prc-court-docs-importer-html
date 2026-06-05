@@ -17,6 +17,11 @@ from .html_normalizer import (
     extract_date_components,
     strip_signature_leading_junk,
 )
+from .date_metadata import (
+    DateComponents,
+    coerce_valid_prc_date_components,
+    extract_year_from_case_number,
+)
 from .location import infer_location_from_court
 
 
@@ -666,11 +671,35 @@ def render_footer() -> str:
     return "{{PD-PRC-exempt}}\n"
 
 
+def resolve_date_components(
+    doc: ParsedDocument,
+    date_fallback: Optional[DateComponents] = None,
+) -> DateComponents:
+    """Resolve header date metadata by HTML date, s31 fallback, then case number year."""
+    candidates: list[DateComponents] = []
+
+    if doc.date_block:
+        candidates.append(extract_date_components(doc.date_block.text))
+    if date_fallback:
+        candidates.append(date_fallback)
+
+    case_number_year = extract_year_from_case_number(doc.doc_id)
+    if case_number_year:
+        candidates.append((case_number_year, None, None))
+
+    for candidate in candidates:
+        year, month, day = coerce_valid_prc_date_components(candidate)
+        if year:
+            return year, month, day
+
+    return None, None, None
+
+
 def render_wikitext(
     doc: ParsedDocument,
     title: str,
     docid: Optional[str] = None,
-    date_fallback: Optional[Tuple[Optional[str], Optional[str], Optional[str]]] = None,
+    date_fallback: Optional[DateComponents] = None,
 ) -> str:
     """
     Render a ParsedDocument as complete wikitext for zhwikisource.
@@ -682,14 +711,7 @@ def render_wikitext(
     Returns:
         Complete wikitext string ready for upload
     """
-    # Extract date components, falling back to metadata when no parseable date
-    # was found in the HTML.
-    year, month, day = date_fallback or (None, None, None)
-    if doc.date_block:
-        parsed_year, parsed_month, parsed_day = extract_date_components(doc.date_block.text)
-        year = parsed_year or year
-        month = parsed_month or month
-        day = parsed_day or day
+    year, month, day = resolve_date_components(doc, date_fallback)
 
     # Infer location from court name
     location = infer_location_from_court(doc.court_name)

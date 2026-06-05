@@ -6,6 +6,7 @@ Run with: pytest tests/
 
 import json
 import pytest
+from datetime import date
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -274,8 +275,13 @@ class TestDateExtraction:
         assert day == "30"
 
     def test_extract_s31_invalid_date_returns_empty_components(self):
+        future_year = date.today().year + 1
+
         assert extract_date_components_from_s31("") == (None, None, None)
         assert extract_date_components_from_s31("2014/09/30") == (None, None, None)
+        assert extract_date_components_from_s31("1948-12-31") == (None, None, None)
+        assert extract_date_components_from_s31("0001-99-99") == (None, None, None)
+        assert extract_date_components_from_s31(f"{future_year}-01-01") == (None, None, None)
 
 
 class TestSignatureDetection:
@@ -957,6 +963,87 @@ class TestWikitextRendering:
         assert "|year = 2024" in result.wikitext
         assert "|month = 1" in result.wikitext
         assert "|day = 1" in result.wikitext
+
+    def test_convert_document_falls_back_from_pre_prc_html_date_to_s31(self):
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-7",
+            "s2": "北京市第一中级人民法院",
+            "s7": "（2024）京01执123号",
+            "s31": "2024-09-30",
+            "s22": "北京市第一中级人民法院\n执行裁定书\n（2024）京01执123号",
+            "qwContent": """
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市第一中级人民法院</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+                <div style='TEXT-ALIGN: right;'>（2024）京01执123号</div>
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>一九四八年十二月三十一日</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert "|year = 2024" in result.wikitext
+        assert "|month = 9" in result.wikitext
+        assert "|day = 30" in result.wikitext
+
+    def test_convert_document_falls_back_to_case_number_year(self):
+        future_year = date.today().year + 1
+        case_year = str(date.today().year)
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-8",
+            "s2": "北京市第一中级人民法院",
+            "s7": f"（{case_year}）京01执123号",
+            "s31": f"{future_year}-12-31",
+            "s22": f"北京市第一中级人民法院\n执行裁定书\n（{case_year}）京01执123号",
+            "qwContent": """
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市第一中级人民法院</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+                <div style='TEXT-ALIGN: right;'>（CASE_YEAR）京01执123号</div>
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>FUTURE_YEAR年12月31日</div>
+            """.replace("CASE_YEAR", case_year).replace("FUTURE_YEAR", str(future_year)),
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert f"|year = {case_year}" in result.wikitext
+        assert "|month = \n" in result.wikitext
+        assert "|day = \n" in result.wikitext
+
+    def test_convert_document_does_not_use_future_case_number_year(self):
+        future_year = date.today().year + 1
+        raw_json = {
+            "s1": "测试执行裁定书",
+            "wsKey": "doc-9",
+            "s2": "北京市第一中级人民法院",
+            "s7": f"（{future_year}）京01执123号",
+            "s31": f"{future_year}-12-31",
+            "s22": f"北京市第一中级人民法院\n执行裁定书\n（{future_year}）京01执123号",
+            "qwContent": f"""
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>北京市第一中级人民法院</div>
+                <div style='TEXT-ALIGN: center; FONT-SIZE: 18pt;'>执行裁定书</div>
+                <div style='TEXT-ALIGN: right;'>（{future_year}）京01执123号</div>
+                <div style='TEXT-INDENT: 30pt;'>正文。</div>
+                <div style='TEXT-ALIGN: right;'>审判员　李四</div>
+                <div style='TEXT-ALIGN: right;'>{future_year}年12月31日</div>
+            """,
+        }
+
+        result, error = convert_document(raw_json)
+
+        assert error is None
+        assert result is not None
+        assert "|year = \n" in result.wikitext
+        assert "|month = \n" in result.wikitext
+        assert "|day = \n" in result.wikitext
 
 
 class TestTestCasesConversion:

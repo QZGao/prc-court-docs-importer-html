@@ -23,6 +23,7 @@ from .html_normalizer import (
     remove_cjk_spaces,
     remove_unicode_other_chars,
 )
+from .date_metadata import coerce_valid_prc_date_components
 from .wikitext_renderer import render_wikitext
 
 console = Console()
@@ -265,7 +266,7 @@ def extract_date_components_from_s31(s31: str) -> Tuple[Optional[str], Optional[
         return None, None, None
 
     year, month, day = match.groups()
-    return year, str(int(month)), str(int(day))
+    return coerce_valid_prc_date_components((year, str(int(month)), str(int(day))))
 
 
 def infer_court_with_province(s2: str, s22: str) -> str:
